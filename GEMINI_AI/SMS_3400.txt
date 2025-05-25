@@ -1,0 +1,95 @@
+This problem requires a two-way ANOVA (Analysis of Variance) to determine if there are signif
+icant differences in gas mileage due to gasoline brand and/or automobile model.  Here's a ste
+p-by-step guide:
+
+**1. State the Hypotheses:**
+
+* **For Gasoline Brands:**
+    * H₀ (Null Hypothesis): There is no significant difference in mean gas mileage among the 
+three gasoline brands.
+    * H₁ (Alternative Hypothesis): There is a significant difference in mean gas mileage amon
+g the three gasoline brands.
+
+* **For Automobile Models:**
+    * H₀ (Null Hypothesis): There is no significant difference in mean gas mileage among the 
+four automobile models.
+    * H₁ (Alternative Hypothesis): There is a significant difference in mean gas mileage amon
+g the four automobile models.
+
+
+**2. Set the Significance Level (α):**
+
+Typically, a significance level of α = 0.05 is used. This means we're willing to accept a 5% 
+chance of rejecting the null hypothesis when it's actually true (Type I error).
+
+
+**3. Perform the Two-Way ANOVA:**
+
+This is best done using statistical software (like R, SPSS, SAS, or even Excel's Data Analysi
+s Toolpak).  The software will calculate the following:
+
+* **Sum of Squares (SS):**  This measures the variation in the data.  You'll have SS for gaso
+line brands (SSB), SS for automobile models (SSM), SS for the interaction between brands and 
+models (SSBM), and SS for error (SSE).
+* **Degrees of Freedom (df):**  These are related to the number of groups and observations.  
+    * df for brands (dfB) = number of brands - 1 = 3 - 1 = 2
+    * df for models (dfM) = number of models - 1 = 4 - 1 = 3
+    * df for interaction (dfBM) = dfB * dfM = 2 * 3 = 6
+    * df for error (dfE) = (number of brands * number of models) - number of brands - number 
+of models + 1 = (3*4) - 3 - 4 + 1 = 6
+    * df total = total number of observations - 1 = 12 - 1 = 11
+
+* **Mean Squares (MS):**  This is calculated by dividing the SS by the df.  MS = SS/df (MSB, 
+MSM, MSBM, MSE)
+
+* **F-statistic:** This is the ratio of the mean squares for each factor (brands and models) 
+to the mean square error.
+    * FB = MSB / MSE
+    * FM = MSM / MSE
+
+* **p-values:** The p-value for each F-statistic indicates the probability of observing the d
+ata if the null hypothesis is true.
+
+
+**4. Interpret the Results:**
+
+* **Gasoline Brands:** Compare the p-value for the F-statistic (FB) to your significance leve
+l (α = 0.05).
+    * If the p-value is less than α (p < 0.05), reject the null hypothesis.  There is a stati
+stically significant difference in gas mileage among the gasoline brands.
+    * If the p-value is greater than or equal to α (p ≥ 0.05), fail to reject the null hypoth
+esis. There is not enough evidence to conclude a significant difference in gas mileage among 
+the brands.
+
+* **Automobile Models:** Compare the p-value for the F-statistic (FM) to your significance le
+vel (α = 0.05).  Interpret similarly to the gasoline brands.
+
+* **Interaction:**  The p-value associated with the interaction term (SSBM) tells you if the 
+effect of gasoline brand depends on the automobile model (and vice-versa).  A significant int
+eraction means the effect of one factor depends on the level of the other.
+
+
+**5.  Example using R (Statistical Software):**
+
+
+First, you need to enter the data into R.  A good way to do this is with a data frame:       
+
+```R
+data <- data.frame(
+  Brand = factor(rep(c("1", "2", "3"), each = 4)),
+  Model = factor(rep(c("I", "II", "III", "IV"), times = 3)),
+  Mileage = c(32.4, 28.8, 36.5, 34.4, 35.6, 28.6, 37.6, 36.2, 38.7, 29.9, 39.1, 37.9)        
+)
+
+model <- aov(Mileage ~ Brand + Model + Brand:Model, data = data)
+summary(model)
+```
+
+The `summary(model)` command will provide the ANOVA table with the F-statistics and p-values 
+you need to make your conclusions.
+
+
+Remember to carefully interpret the output from your chosen software.  The ANOVA table will g
+ive you the necessary F-statistics and p-values to determine statistical significance.  If th
+ere's a significant interaction effect, you'll need to explore the data further (perhaps with
+ post-hoc tests) to understand the nature of the interaction.
