@@ -2,8 +2,7 @@ import requests
 import json
 import os
 
-# API_KEY = "AIzaSyCIAcNBkPcICXCtB0-8xzfElj3YqRMZDzQ"
-# print(API_KEY)
+
 url = "https://openlibrary.org/api/books?bibkeys=ISBN:9781932705096&format=json"
 response = requests.get(url)
 if response:
