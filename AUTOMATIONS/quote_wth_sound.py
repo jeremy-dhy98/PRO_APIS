@@ -91,7 +91,7 @@ def fetch_quote():
     """
     url = "https://zenquotes.io/api/random"
     try:
-        response = requests.get(url)
+        response = requests.get(url, timeout=10)
         response.raise_for_status()
         data = response.json()
         if data:
@@ -107,7 +107,7 @@ def fetch_cat_image(api_key):
     url = "https://api.thecatapi.com/v1/images/search"
     headers = {"x-api-key": api_key}
     try:
-        response = requests.get(url, headers=headers)
+        response = requests.get(url, headers=headers, timeout=10)
         response.raise_for_status()
         data = response.json()
         if data:
@@ -325,7 +325,7 @@ def fetch_voiceover(quote, api_key):
         "v": "John"
     }
     try:
-        response = requests.get(url, params=params)
+        response = requests.get(url, params=params, timeout=10)
         response.raise_for_status()
         return response.content
     except requests.exceptions.RequestException as e:

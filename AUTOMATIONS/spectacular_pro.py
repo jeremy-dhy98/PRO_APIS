@@ -22,7 +22,7 @@ def fetch_quote():
     """Fetches a random motivational quote from ZenQuotes API."""
     url = "https://zenquotes.io/api/random"
     try:
-        response = requests.get(url)
+        response = requests.get(url, timeout=10)
         response.raise_for_status()
         data = response.json()
         if isinstance(data, list) and data:
@@ -39,13 +39,13 @@ def fetch_cat_image(api_key, target_width=1280, target_height=720):
     url = "https://api.thecatapi.com/v1/images/search"
     headers = {"x-api-key": api_key}
     try:
-        response = requests.get(url, headers=headers)
+        response = requests.get(url, headers=headers, timeout=10)
         response.raise_for_status()
         data = response.json()
         if isinstance(data, list) and data:
             if "url" in data[0]:
                 image_url = data[0]["url"]
-                response = requests.get(image_url)
+                response = requests.get(image_url, timeout=10)
                 response.raise_for_status()
                 img = Image.open(BytesIO(response.content))
                 img = img.convert("RGB")
@@ -73,7 +73,7 @@ def fetch_voiceover(quote, api_key):
         "v": "John"
     }
     try:
-        response = requests.get(url, params=params)
+        response = requests.get(url, params=params, timeout=10)
         response.raise_for_status()
         file_path = "voiceover.mp3"
         with open(file_path, "wb") as f:

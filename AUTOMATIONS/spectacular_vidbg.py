@@ -26,7 +26,7 @@ def fetch_quote():
 
     url = "https://zenquotes.io/api/random"
     try:
-        response = requests.get(url)
+        response = requests.get(url, timeout=10)
         response.raise_for_status()
         data = response.json()
         logging.info(f"Fetched data: {data}")
@@ -58,7 +58,7 @@ def fetch_voiceover(quote, api_key):
         "v": "John"
     }
     try:
-        response = requests.get(url, params=params)
+        response = requests.get(url, params=params, timeout=10)
         response.raise_for_status()
         file_path = "voiceover.mp3"
         with open(file_path, "wb") as f:
