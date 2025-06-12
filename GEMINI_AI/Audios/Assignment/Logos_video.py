@@ -90,8 +90,7 @@ final_video.close()
 
 # Display the final video
 # ipd.Video("logos_final_2.mp4", width=650, height=350, embed=True)
-# ffmpeg -i Screenrecording_20241215_172419.mp4 -c:v libx264 -c:a aac -strict experimental reencoded_video.mp4
-# ffmpeg -i Screenrecording_20241215_172419.mp4 -f null -
+
 
 
 
