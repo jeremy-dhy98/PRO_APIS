@@ -70,18 +70,15 @@ def extract_video_frames(video_file, fps=30):
     except Exception:
         video_mtime = None
 
-    # Check metadata: if matches same video path and mtime, and frames exist, skip extraction
-    meta = load_frames_metadata()
-    if meta and meta.get("video_path") == os.path.abspath(video_file) and video_mtime == meta.get("mtime"):
-        # Check that some frames exist
-        existing = [f for f in os.listdir(output_dir) if f.endswith(".png")]
-        if existing:
-            frame_files = [os.path.join(output_dir, f) for f in sorted(existing)]
-            logging.info(f"Using cached frames ({len(frame_files)}) for unchanged video.")
-            return frame_files
-        # else fall through to re-extract
+    # --- CACHING DISABLED: always re-extract frames ---
+    # Remove any cached metadata file
+    # (If you wish, you can still write metadata, but it won't be used in checks below.)
+    try:
+        if os.path.exists(METADATA_PATH):
+            os.remove(METADATA_PATH)
+    except Exception:
+        pass
 
-    # Otherwise, (re-)extract frames
     # First, clear existing frames
     for fname in os.listdir(output_dir):
         if fname.endswith(".png"):
@@ -89,7 +86,7 @@ def extract_video_frames(video_file, fps=30):
                 os.remove(os.path.join(output_dir, fname))
             except Exception:
                 pass
-    # Run ffmpeg
+    # Run ffmpeg to extract frames
     frame_pattern = os.path.join(output_dir, "frame%03d.png")
     command = ["ffmpeg", "-y", "-i", video_file, "-vf", f"fps={fps}", frame_pattern]
     logging.info(f"Extracting frames from video via ffmpeg: fps={fps}")
@@ -102,7 +99,7 @@ def extract_video_frames(video_file, fps=30):
     frame_files = [os.path.join(output_dir, f) for f in os.listdir(output_dir) if f.endswith(".png")]
     frame_files = sorted(frame_files)
     if frame_files:
-        # Save metadata
+        # Save metadata (though not used for skipping)
         if video_mtime is not None:
             save_frames_metadata(os.path.abspath(video_file), video_mtime)
         logging.info(f"Extracted and cached {len(frame_files)} frames.")
@@ -132,18 +129,14 @@ def loop_sound(audio_file, target_duration):
     looped_name = f"looped_{base}_{int(target_duration)}s.mp3"
     looped_path = os.path.join(BASE_DIR, looped_name)
 
-    # If exists with correct duration, skip re-processing
+    # --- CACHING DISABLED: always recreate the looped audio ---
+    # Remove existing if present
     if os.path.exists(looped_path):
-        dur = get_audio_duration(looped_path)
-        if dur is not None and abs(dur - target_duration) < 0.1:
-            logging.info(f"Using cached looped audio: {looped_name}")
-            return looped_path
-        else:
-            # remove stale
-            try:
-                os.remove(looped_path)
-            except Exception:
-                pass
+        try:
+            os.remove(looped_path)
+            logging.info(f"Removed stale looped audio: {looped_name}")
+        except Exception:
+            pass
 
     # Perform looping
     try:
@@ -177,17 +170,13 @@ def trim_audio(audio_file, max_duration=30):
     trimmed_name = f"trimmed_{base}_{int(max_duration)}s.mp3"
     trimmed_path = os.path.join(BASE_DIR, trimmed_name)
 
-    # If exists with correct (<=) duration, skip re-processing
+    # --- CACHING DISABLED: always recreate trimmed audio ---
     if os.path.exists(trimmed_path):
-        dur = get_audio_duration(trimmed_path)
-        if dur is not None and dur <= max_duration + 0.1:
-            logging.info(f"Using cached trimmed audio: {trimmed_name}")
-            return trimmed_path
-        else:
-            try:
-                os.remove(trimmed_path)
-            except Exception:
-                pass
+        try:
+            os.remove(trimmed_path)
+            logging.info(f"Removed stale trimmed audio: {trimmed_name}")
+        except Exception:
+            pass
 
     # Perform trimming
     try:
@@ -233,24 +222,19 @@ def fetch_voiceover(quote, api_key):
     """Fetches voiceover for the given quote using VoiceRSS API (and caches per-quote)."""
     global voiceover_file, _voiceover_cached_quote
 
-    # If we have cached quote and it matches current quote, and file exists, reuse
-    if _voiceover_cached_quote == quote and voiceover_file and os.path.exists(voiceover_file):
-        logging.info(f"Reusing cached voiceover for the same quote: {voiceover_file}")
-        return voiceover_file
-
-    # Otherwise: need to fetch a new voiceover
+    # Always fetch new voiceover for the quote
     # Remove old cached file if it exists
     if voiceover_file and os.path.exists(voiceover_file):
         try:
             os.remove(voiceover_file)
-            logging.info("Removed previous cached voiceover file")
+            logging.info("Removed previous voiceover file to fetch new")
         except Exception as e:
-            logging.warning(f"Could not remove old cached voiceover: {e}")
-    # Also if VOICEOVER_FILENAME exists from disk but was for a different quote, remove it
-    if os.path.exists("voiceover.mp3") and _voiceover_cached_quote != quote:
+            logging.warning(f"Could not remove old voiceover: {e}")
+    # Also if VOICEOVER_FILENAME exists from disk, remove it
+    if os.path.exists("voiceover.mp3"):
         try:
             os.remove("voiceover.mp3")
-            logging.info("Removed existing voiceover.mp3 on disk since quote changed")
+            logging.info("Removed existing voiceover.mp3 on disk to fetch new")
         except Exception:
             pass
 

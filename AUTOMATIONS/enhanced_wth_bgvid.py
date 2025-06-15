@@ -10,6 +10,8 @@ import random
 import shutil
 import tempfile
 import stat
+from io import BytesIO
+from PIL import Image
 
 # Set up logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
@@ -112,10 +114,29 @@ def fetch_pixabay_videos(query="nature", per_page=20, num_downloads=1, prefer_re
             logging.error(f"Failed to download Pixabay video {file_url}: {e}")
     return downloaded
 
+def video_has_audio(video_path):
+    """
+    Use ffmpeg to probe if the downloaded video has an audio stream.
+    Returns True if audio stream is present, False otherwise.
+    """
+    # Run ffmpeg -i and parse stderr for "Audio:"
+    cmd = ["ffmpeg", "-i", video_path]
+    # We capture stderr only
+    try:
+        proc = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True, check=False)
+        stderr = proc.stderr or ""
+        # Look for "Audio:" in the ffmpeg output
+        if "Audio:" in stderr:
+            return True
+    except Exception as e:
+        logging.warning(f"Error probing video for audio: {e}")
+    return False
+
 def fetch_pexels_sound(query="rain", per_page=15):
     """
-    Search Pexels for videos matching `query`, download one short video clip,
+    Search Pexels for videos matching `query`, download one short video clip that has audio,
     extract its audio track via ffmpeg into BG_SOUNDS_DIR, and return the audio path.
+    If a clip has no audio, skip it and try another until exhausted.
     """
     if not PEXELS_API_KEY:
         logging.warning("PEXELS_API_KEY not set; skipping Pexels sound fetch.")
@@ -143,85 +164,99 @@ def fetch_pexels_sound(query="rain", per_page=15):
         logging.warning(f"No Pexels videos found for sound query: {query}")
         return None
 
-    # Pick a random video
-    choice = random.choice(videos)
-    video_files = choice.get("video_files", [])
-    if not video_files:
-        logging.warning(f"No video_files entries in chosen Pexels result for '{query}'")
-        return None
-    # Prefer SD ("sd") if available to reduce size
-    file_url = None
-    for vf in video_files:
-        if vf.get("quality") == "sd" and vf.get("link"):
-            file_url = vf["link"]
-            break
-    if not file_url:
-        # fallback to random available link
-        candidates = [vf.get("link") for vf in video_files if vf.get("link")]
-        if candidates:
+    # Shuffle list so we try random order
+    random.shuffle(videos)
+    for choice in videos:
+        video_files = choice.get("video_files", [])
+        if not video_files:
+            continue
+        # Prefer SD ("sd") if available to reduce size
+        candidates = []
+        sd_url = None
+        for vf in video_files:
+            if vf.get("quality") == "sd" and vf.get("link"):
+                sd_url = vf["link"]
+                break
+            elif vf.get("link"):
+                candidates.append(vf["link"])
+        if sd_url:
+            file_url = sd_url
+        elif candidates:
             file_url = random.choice(candidates)
-    if not file_url:
-        logging.warning(f"No URL found for Pexels video for sound '{query}'")
-        return None
+        else:
+            continue
 
-    # Download video to temporary file
-    tmp_video_path = os.path.join(
-        tempfile.gettempdir(),
-        f"pexels_{query.replace(' ','_')}_{random.randint(0, int(1e6))}.mp4"
-    )
-    try:
-        logging.info(f"Downloading Pexels video for sound: {file_url}")
-        with requests.get(file_url, stream=True, timeout=30) as r:
-            r.raise_for_status()
-            with open(tmp_video_path, "wb") as f:
-                for chunk in r.iter_content(chunk_size=1024*1024):
-                    f.write(chunk)
-    except Exception as e:
-        logging.error(f"Failed to download Pexels video {file_url}: {e}")
+        # Download video to temporary file
+        tmp_video_path = os.path.join(
+            tempfile.gettempdir(),
+            f"pexels_{query.replace(' ','_')}_{random.randint(0, int(1e6))}.mp4"
+        )
         try:
-            os.remove(tmp_video_path)
-        except Exception:
-            pass
-        return None
+            logging.info(f"Downloading Pexels video for sound '{query}': {file_url}")
+            with requests.get(file_url, stream=True, timeout=30) as r:
+                r.raise_for_status()
+                with open(tmp_video_path, "wb") as f:
+                    for chunk in r.iter_content(chunk_size=1024*1024):
+                        f.write(chunk)
+        except Exception as e:
+            logging.error(f"Failed to download Pexels video {file_url}: {e}")
+            try:
+                os.remove(tmp_video_path)
+            except Exception:
+                pass
+            continue
 
-    # Extract audio via ffmpeg: output MP3 in BG_SOUNDS_DIR
-    # Name audio based on query and video id
-    audio_filename = f"pexels_{query.replace(' ','_')}_{choice.get('id', '0')}.mp3"
-    audio_path = os.path.join(BG_SOUNDS_DIR, audio_filename)
-    # If already exists, skip extraction
-    if os.path.exists(audio_path):
-        logging.info(f"Pexels-derived sound already exists, skipping extraction: {audio_filename}")
+        # Probe for audio
+        if not video_has_audio(tmp_video_path):
+            logging.info(f"Downloaded Pexels clip has no audio track, skipping: {file_url}")
+            try:
+                os.remove(tmp_video_path)
+            except Exception:
+                pass
+            continue
+
+        # Extract audio via ffmpeg: output MP3 in BG_SOUNDS_DIR
+        audio_filename = f"pexels_{query.replace(' ','_')}_{choice.get('id', '0')}.mp3"
+        audio_path = os.path.join(BG_SOUNDS_DIR, audio_filename)
+        # If already exists, skip extraction
+        if os.path.exists(audio_path):
+            logging.info(f"Pexels-derived sound already exists, skipping extraction: {audio_filename}")
+            try:
+                os.remove(tmp_video_path)
+            except Exception:
+                pass
+            return audio_path
+
+        # Run ffmpeg to extract audio
+        # ffmpeg -i input.mp4 -vn -acodec libmp3lame -q:a 4 output.mp3
+        cmd = [
+            "ffmpeg", "-y", "-i", tmp_video_path,
+            "-vn", "-acodec", "libmp3lame", "-q:a", "4",
+            audio_path
+        ]
+        logging.info(f"Extracting audio via ffmpeg: {' '.join(cmd)}")
         try:
-            os.remove(tmp_video_path)
-        except Exception:
-            pass
-        return audio_path
+            subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+        except Exception as e:
+            logging.error(f"ffmpeg audio extraction failed: {e}")
+        finally:
+            # Always attempt to remove temp video
+            try:
+                os.remove(tmp_video_path)
+            except Exception:
+                pass
 
-    # Run ffmpeg to extract audio
-    # ffmpeg -i input.mp4 -vn -acodec libmp3lame -q:a 4 output.mp3
-    cmd = [
-        "ffmpeg", "-y", "-i", tmp_video_path,
-        "-vn", "-acodec", "libmp3lame", "-q:a", "4",
-        audio_path
-    ]
-    logging.info(f"Extracting audio via ffmpeg: {' '.join(cmd)}")
-    try:
-        subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
-    except Exception as e:
-        logging.error(f"ffmpeg audio extraction failed: {e}")
-    finally:
-        # Always attempt to remove temp video
-        try:
-            os.remove(tmp_video_path)
-        except Exception:
-            pass
+        if os.path.exists(audio_path):
+            logging.info(f"Extracted audio saved to: {audio_path}")
+            return audio_path
+        else:
+            logging.warning(f"ffmpeg did not produce audio file for '{query}', trying next clip if any")
+            # continue to next clip
+            continue
 
-    if os.path.exists(audio_path):
-        logging.info(f"Extracted audio saved to: {audio_path}")
-        return audio_path
-    else:
-        logging.warning(f"ffmpeg did not produce audio file for '{query}'")
-        return None
+    # If we reach here, no clip produced audio
+    logging.warning(f"No Pexels video with audio found for query '{query}'")
+    return None
 
 def populate_media_if_needed():
     """
@@ -422,13 +457,13 @@ prepare_random_background_and_sound()
 # Global variables to store fetched data (avoiding redundant calls)
 quote_data = None
 voiceover_file = None
+# Reset cached quote text tracker
+_voiceover_cached_quote = None
 
 def fetch_quote():
-    """Fetches a random motivational quote from ZenQuotes API."""
+    """Fetches a random motivational quote from ZenQuotes API (always fresh)."""
     global quote_data
-    if quote_data is not None:
-        return quote_data
-
+    # Always fetch a fresh quote; do not reuse previous quote_data
     url = "https://zenquotes.io/api/random"
     try:
         response = requests.get(url, timeout=10)
@@ -436,21 +471,46 @@ def fetch_quote():
         data = response.json()
         logging.info(f"Fetched data: {data}")
         if isinstance(data, list) and data:
-            quote_data = {"quote": data[0].get("q", "No quote found"),
-                          "author": data[0].get("a", "Unknown")}
-            return quote_data
+            result = {"quote": data[0].get("q", "No quote found"),
+                      "author": data[0].get("a", "Unknown")}
+            quote_data = result
+            return result
     except requests.exceptions.RequestException as e:
         logging.error(f"Error fetching quote: {e}")
-    
-    quote_data = {"quote": "No quote found", "author": "Unknown"}
-    return quote_data
+    # On error, still update global to avoid stale
+    result = {"quote": "No quote found", "author": "Unknown"}
+    quote_data = result
+    return result
 
 def fetch_voiceover(quote, api_key):
-    """Fetches voiceover for the given quote using VoiceRSS API (and caches result)."""
-    global voiceover_file
-    if voiceover_file is not None and os.path.exists(voiceover_file):
+    """Fetches voiceover for the given quote using VoiceRSS API (and caches per-quote)."""
+    global voiceover_file, _voiceover_cached_quote
+
+    # If we have cached quote and it matches current quote, and file exists, reuse
+    if _voiceover_cached_quote == quote and voiceover_file and os.path.exists(voiceover_file):
+        logging.info(f"Reusing cached voiceover for the same quote: {voiceover_file}")
         return voiceover_file
 
+    # Otherwise: need to fetch a new voiceover
+    # Remove old cached file if it exists
+    if voiceover_file and os.path.exists(voiceover_file):
+        try:
+            os.remove(voiceover_file)
+            logging.info("Removed previous cached voiceover file")
+        except Exception as e:
+            logging.warning(f"Could not remove old cached voiceover: {e}")
+    # Also if VOICEOVER_FILENAME exists from disk but was for a different quote, remove it
+    if os.path.exists("voiceover.mp3") and _voiceover_cached_quote != quote:
+        try:
+            os.remove("voiceover.mp3")
+            logging.info("Removed existing voiceover.mp3 on disk since quote changed")
+        except Exception:
+            pass
+
+    voiceover_file = None
+    _voiceover_cached_quote = None
+
+    # Download new voiceover for the current quote
     url = "https://api.voicerss.org/"
     params = {
         "key": api_key,
@@ -468,10 +528,54 @@ def fetch_voiceover(quote, api_key):
         file_path = "voiceover.mp3"
         with open(file_path, "wb") as f:
             f.write(response.content)
+        logging.info(f"Downloaded new voiceover to {file_path}")
         voiceover_file = file_path
-        return file_path
+        _voiceover_cached_quote = quote
+        return voiceover_file
     except requests.exceptions.RequestException as e:
         logging.error(f"Error fetching voiceover: {e}")
+    return None
+
+def fetch_cat_image(api_key, target_width=1280, target_height=720):
+    """
+    Fetches a random cat image from TheCatAPI and saves it locally.
+    Always fetches a new image (no caching), overwriting CAT_IMAGE_FILENAME.
+    """
+    CAT_IMAGE_FILENAME = "cat_image.jpg"
+    BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+    CAT_IMAGE_PATH = os.path.join(BASE_DIR, CAT_IMAGE_FILENAME)
+
+    # Always fetch a new image; remove old if exists
+    if os.path.exists(CAT_IMAGE_PATH):
+        try:
+            os.remove(CAT_IMAGE_PATH)
+            logging.info("Removed old cached cat image to fetch a fresh one")
+        except Exception:
+            pass
+
+    url = "https://api.thecatapi.com/v1/images/search"
+    headers = {"x-api-key": api_key} if api_key else {}
+    try:
+        response = requests.get(url, headers=headers, timeout=10)
+        response.raise_for_status()
+        data = response.json()
+        if isinstance(data, list) and data:
+            if "url" in data[0]:
+                image_url = data[0]["url"]
+                response2 = requests.get(image_url, timeout=10)
+                response2.raise_for_status()
+                img = Image.open(BytesIO(response2.content))
+                # Optionally resize to target dimensions while preserving aspect:
+                img = img.convert("RGB")
+                img.save(CAT_IMAGE_PATH)
+                logging.info(f"Fetched and saved fresh cat image to {CAT_IMAGE_PATH}")
+                return CAT_IMAGE_PATH
+            else:
+                logging.error("No 'url' key found in the CatAPI response data.")
+        else:
+            logging.error("CatAPI response is not a valid list or is empty.")
+    except requests.exceptions.RequestException as e:
+        logging.error(f"Error fetching cat image: {e}")
     return None
 
 def create_quote_mobjects(quote_text, quote_author, frame_width, frame_height):
@@ -511,6 +615,9 @@ def loop_sound(audio_file, target_duration):
     """
     audio = AudioSegment.from_file(audio_file)  # pydub infers the format
     original_duration = len(audio) / 1000.0
+    if original_duration <= 0:
+        logging.warning(f"Original audio has zero length: {audio_file}")
+        return audio_file
     loops_needed = int(target_duration / original_duration) + 1
     full_audio = audio * loops_needed  # Repeat the audio
     trimmed_audio = full_audio[:int(target_duration * 1000)]
@@ -560,6 +667,7 @@ class AnimatedQuoteWithBackground(Scene):
 
         # Add looping background sound (trimmed to total_duration)
         cool_effect_file = "subclip.ogg"
+        # If EXPECTED_SOUND exists (symlinked or copied from BG_SOUNDS_DIR), loop it:
         looped_effect = loop_sound(cool_effect_file, total_duration)
         self.add_sound(looped_effect, gain=-5)
 
@@ -570,12 +678,15 @@ class AnimatedQuoteWithBackground(Scene):
         # Instead of animating every frame, select a subset.
         # Aim for one frame transition every ~2 seconds.
         desired_transitions = int(total_duration // 2)
-        frame_interval = max(1, len(video_frames) // desired_transitions)
-        selected_frames = video_frames[::frame_interval]
+        frame_interval = max(1, len(video_frames) // desired_transitions) if video_frames else 1
+        selected_frames = video_frames[::frame_interval] if video_frames else []
         
         # Create initial background image from the first selected frame.
-        bg_image = ImageMobject(selected_frames[0]).scale(4)
-        self.add(bg_image)
+        if selected_frames:
+            bg_image = ImageMobject(selected_frames[0]).scale(4)
+            self.add(bg_image)
+        else:
+            bg_image = None
         
         # Fetch quote
         quote_info = fetch_quote()
@@ -615,7 +726,12 @@ class AnimatedQuoteWithBackground(Scene):
         bg_transition_time = 0.5
         for frame in selected_frames[1:]:
             new_bg = ImageMobject(frame).scale(4)
-            self.play(Transform(bg_image, new_bg), run_time=bg_transition_time)
+            if bg_image:
+                self.play(Transform(bg_image, new_bg), run_time=bg_transition_time)
+                bg_image = new_bg
+            else:
+                self.add(new_bg)
+                bg_image = new_bg
 
         # Calculate total animation time spent.
         time_text = time_fadein + time_write + time_color + time_scale + time_author

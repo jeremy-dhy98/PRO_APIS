@@ -36,27 +36,22 @@ _voiceover_cached = None
 _voiceover_cached_quote = None
 
 def fetch_voiceover(quote, api_key):
-    """Fetches voiceover for the given quote using VoiceRSS API, with caching tied to quote text."""
+    """Fetches voiceover for the given quote using VoiceRSS API, always fetching fresh."""
     global _voiceover_cached, _voiceover_cached_quote
 
-    # If we have cached quote and it matches current quote, and file exists, reuse
-    if _voiceover_cached_quote == quote and _voiceover_cached and os.path.exists(_voiceover_cached):
-        logging.info("Reusing cached voiceover for the same quote")
-        return _voiceover_cached
-
-    # Otherwise: need to fetch a new voiceover
+    # --- CACHING DISABLED: always fetch a new voiceover ---
     # Remove old cached file if it exists
     if _voiceover_cached and os.path.exists(_voiceover_cached):
         try:
             os.remove(_voiceover_cached)
-            logging.info("Removed previous cached voiceover file")
+            logging.info("Removed previous voiceover file to fetch new")
         except Exception as e:
-            logging.warning(f"Could not remove old cached voiceover: {e}")
-    # Also if VOICEOVER_PATH exists but was for a different quote, remove it
-    if os.path.exists(VOICEOVER_PATH) and _voiceover_cached_quote != quote:
+            logging.warning(f"Could not remove old voiceover: {e}")
+    # Also if VOICEOVER_PATH exists on disk, remove it
+    if os.path.exists(VOICEOVER_PATH):
         try:
             os.remove(VOICEOVER_PATH)
-            logging.info("Removed existing voiceover file on disk since quote changed")
+            logging.info("Removed existing voiceover.mp3 on disk to fetch new")
         except Exception:
             pass
 
@@ -95,35 +90,21 @@ _cat_cached_quote = None
 def fetch_cat_image(api_key, target_width=1280, target_height=720):
     """
     Fetches a random cat image from TheCatAPI and saves it locally.
-    Caches as 'cat_image.jpg' in script directory if the quote hasn't changed;
-    if the quote has changed since last fetch, removes old image and fetches new.
+    Always fetch fresh (caching disabled).
     """
     global _cat_cached_quote
 
-    # Determine current quote text from global quote_data, if available
-    current_quote = None
-    try:
-        # if quote_data has been set by fetch_quote earlier
-        from __main__ import quote_data
-        if isinstance(quote_data, dict):
-            current_quote = quote_data.get("quote")
-    except Exception:
-        current_quote = None
-
-    # If we have a cached image and quote hasn't changed, reuse
-    if current_quote is not None and _cat_cached_quote == current_quote and os.path.exists(CAT_IMAGE_PATH):
-        logging.info(f"Reusing existing cat image for same quote: {CAT_IMAGE_PATH}")
-        return CAT_IMAGE_PATH
-
-    # Otherwise: if an old image exists, remove it
-    if os.path.exists(CAT_IMAGE_PATH) and (_cat_cached_quote is not None and _cat_cached_quote != current_quote):
+    # --- CACHING DISABLED: always fetch a new cat image ---
+    # Remove old image if exists
+    if os.path.exists(CAT_IMAGE_PATH):
         try:
             os.remove(CAT_IMAGE_PATH)
-            logging.info("Removed previous cached cat image because quote changed")
+            logging.info("Removed previous cat image to fetch new")
         except Exception as e:
             logging.warning(f"Could not remove old cat image: {e}")
+    _cat_cached_quote = None
 
-    # Fetch new cat image for the current quote (or first time)
+    # Fetch new cat image
     url = "https://api.thecatapi.com/v1/images/search"
     headers = {"x-api-key": api_key} if api_key else {}
     try:
@@ -140,8 +121,7 @@ def fetch_cat_image(api_key, target_width=1280, target_height=720):
                 img = img.convert("RGB")
                 img.save(CAT_IMAGE_PATH)
                 logging.info(f"Fetched and saved cat image to {CAT_IMAGE_PATH}")
-                # Update cache key
-                _cat_cached_quote = current_quote
+                # No caching of quote tied here; always fresh next time
                 return CAT_IMAGE_PATH
             else:
                 logging.error("No 'url' key found in the CatAPI response data.")
@@ -162,25 +142,21 @@ def get_audio_duration(audio_file):
 
 def loop_sound(audio_file, target_duration):
     """
-    Loops and trims an audio file to match the target duration, caching result.
+    Loops and trims an audio file to match the target duration, always recreating.
     Returns path to looped file.
     """
-    # Name for cached looped file
+    # Name for looped file
     base, _ = os.path.splitext(os.path.basename(audio_file))
     looped_name = f"looped_{base}_{int(target_duration)}s.mp3"
     looped_path = os.path.join(BASE_DIR, looped_name)
 
-    # If exists and duration matches, reuse
+    # --- CACHING DISABLED: always recreate looped audio ---
     if os.path.exists(looped_path):
-        dur = get_audio_duration(looped_path)
-        if dur is not None and abs(dur - target_duration) < 0.1:
-            logging.info(f"Reusing cached looped audio: {looped_name}")
-            return looped_path
-        else:
-            try:
-                os.remove(looped_path)
-            except Exception:
-                pass
+        try:
+            os.remove(looped_path)
+            logging.info(f"Removed stale looped audio: {looped_name}")
+        except Exception:
+            pass
 
     # Perform looping
     try:
@@ -198,7 +174,7 @@ def loop_sound(audio_file, target_duration):
     trimmed_audio = full_audio[:int(target_duration * 1000)]
     try:
         trimmed_audio.export(looped_path, format="mp3")
-        logging.info(f"Created cached looped audio: {looped_name}")
+        logging.info(f"Created looped audio: {looped_name}")
         return looped_path
     except Exception as e:
         logging.error(f"Failed exporting looped audio: {e}")
@@ -207,23 +183,20 @@ def loop_sound(audio_file, target_duration):
 def trim_audio(audio_file, max_duration=30):
     """
     Trims the given audio file to a maximum duration (in seconds).
-    Caches the trimmed file.
+    Always recreates trimmed file.
+    Returns the path to the trimmed audio file.
     """
     base, _ = os.path.splitext(os.path.basename(audio_file))
     trimmed_name = f"trimmed_{base}_{int(max_duration)}s.mp3"
     trimmed_path = os.path.join(BASE_DIR, trimmed_name)
 
-    # If exists and duration <= max_duration, reuse
+    # --- CACHING DISABLED: always recreate trimmed audio ---
     if os.path.exists(trimmed_path):
-        dur = get_audio_duration(trimmed_path)
-        if dur is not None and dur <= max_duration + 0.1:
-            logging.info(f"Reusing cached trimmed audio: {trimmed_name}")
-            return trimmed_path
-        else:
-            try:
-                os.remove(trimmed_path)
-            except Exception:
-                pass
+        try:
+            os.remove(trimmed_path)
+            logging.info(f"Removed stale trimmed audio: {trimmed_name}")
+        except Exception:
+            pass
 
     # Perform trimming
     try:
@@ -234,7 +207,7 @@ def trim_audio(audio_file, max_duration=30):
     trimmed_audio = audio[:max_duration * 1000]
     try:
         trimmed_audio.export(trimmed_path, format="mp3")
-        logging.info(f"Created cached trimmed audio: {trimmed_name}")
+        logging.info(f"Created trimmed audio: {trimmed_name}")
         return trimmed_path
     except Exception as e:
         logging.error(f"Failed exporting trimmed audio: {e}")
