@@ -18,12 +18,199 @@ voice_api_key = os.environ.get("VOICE_RSS_API_KEY")
 quote_data = None
 voiceover_file = None
 
+# Introduce a new global to track the last quote used for voiceover caching
+_voiceover_cached_quote = None
+
+# === BEGIN: Performance enhancements ===
+# 1) Resolve paths relative to script location
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+# Default filenames (unchanged functionality)
+VIDEO_FILENAME = "219305_tiny.mp4"
+SOUND_FILENAME = "subclip.ogg"
+
+VIDEO_PATH = os.path.join(BASE_DIR, VIDEO_FILENAME)
+SOUND_PATH = os.path.join(BASE_DIR, SOUND_FILENAME)
+
+# Frames directory and metadata file
+FRAMES_DIR = os.path.join(BASE_DIR, "video_frames")
+METADATA_PATH = os.path.join(FRAMES_DIR, "frames_meta.json")
+
+def load_frames_metadata():
+    """Load metadata dict from METADATA_PATH if exists; else return None."""
+    if os.path.exists(METADATA_PATH):
+        try:
+            with open(METADATA_PATH, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception as e:
+            logging.warning(f"Could not read frames metadata: {e}")
+    return None
+
+def save_frames_metadata(video_path, mtime):
+    """Save metadata about extracted frames."""
+    data = {"video_path": video_path, "mtime": mtime}
+    try:
+        with open(METADATA_PATH, "w", encoding="utf-8") as f:
+            json.dump(data, f)
+    except Exception as e:
+        logging.warning(f"Could not write frames metadata: {e}")
+
+def extract_video_frames(video_file, fps=30):
+    """
+    Extracts frames from the given video file using FFmpeg with subprocess.
+    Caches extracted frames based on the video's modification time.
+    Returns a list of frame file paths (absolute).
+    """
+    output_dir = FRAMES_DIR
+    os.makedirs(output_dir, exist_ok=True)
+
+    # Determine video modification time
+    try:
+        video_mtime = os.path.getmtime(video_file)
+    except Exception:
+        video_mtime = None
+
+    # Check metadata: if matches same video path and mtime, and frames exist, skip extraction
+    meta = load_frames_metadata()
+    if meta and meta.get("video_path") == os.path.abspath(video_file) and video_mtime == meta.get("mtime"):
+        # Check that some frames exist
+        existing = [f for f in os.listdir(output_dir) if f.endswith(".png")]
+        if existing:
+            frame_files = [os.path.join(output_dir, f) for f in sorted(existing)]
+            logging.info(f"Using cached frames ({len(frame_files)}) for unchanged video.")
+            return frame_files
+        # else fall through to re-extract
+
+    # Otherwise, (re-)extract frames
+    # First, clear existing frames
+    for fname in os.listdir(output_dir):
+        if fname.endswith(".png"):
+            try:
+                os.remove(os.path.join(output_dir, fname))
+            except Exception:
+                pass
+    # Run ffmpeg
+    frame_pattern = os.path.join(output_dir, "frame%03d.png")
+    command = ["ffmpeg", "-y", "-i", video_file, "-vf", f"fps={fps}", frame_pattern]
+    logging.info(f"Extracting frames from video via ffmpeg: fps={fps}")
+    try:
+        subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=False)
+    except Exception as e:
+        logging.warning(f"ffmpeg extraction failed: {e}")
+
+    # Collect extracted frames
+    frame_files = [os.path.join(output_dir, f) for f in os.listdir(output_dir) if f.endswith(".png")]
+    frame_files = sorted(frame_files)
+    if frame_files:
+        # Save metadata
+        if video_mtime is not None:
+            save_frames_metadata(os.path.abspath(video_file), video_mtime)
+        logging.info(f"Extracted and cached {len(frame_files)} frames.")
+    else:
+        logging.warning("No frames extracted; check video file.")
+    return frame_files
+
+def get_audio_duration(audio_file):
+    """Returns the duration (in seconds) of the given audio file using pydub."""
+    try:
+        audio = AudioSegment.from_file(audio_file, format="mp3")
+        duration_seconds = len(audio) / 1000.0
+        return duration_seconds
+    except Exception as e:
+        logging.warning(f"Could not get audio duration for {audio_file}: {e}")
+        return None
+
+def loop_sound(audio_file, target_duration):
+    """
+    Loops the given audio file (mp3 or ogg) until the target_duration (in seconds)
+    is reached, then trims it to exactly target_duration.
+    Caches the result if identical looped file exists.
+    Returns the path to the resulting audio file.
+    """
+    # Name for looped file: include target_duration in name
+    base, ext = os.path.splitext(os.path.basename(audio_file))
+    looped_name = f"looped_{base}_{int(target_duration)}s.mp3"
+    looped_path = os.path.join(BASE_DIR, looped_name)
+
+    # If exists with correct duration, skip re-processing
+    if os.path.exists(looped_path):
+        dur = get_audio_duration(looped_path)
+        if dur is not None and abs(dur - target_duration) < 0.1:
+            logging.info(f"Using cached looped audio: {looped_name}")
+            return looped_path
+        else:
+            # remove stale
+            try:
+                os.remove(looped_path)
+            except Exception:
+                pass
+
+    # Perform looping
+    try:
+        audio = AudioSegment.from_file(audio_file)
+    except Exception as e:
+        logging.error(f"Error loading audio file {audio_file}: {e}")
+        return audio_file  # fallback
+
+    original_duration = len(audio) / 1000.0
+    if original_duration <= 0:
+        logging.warning(f"Original audio has zero length: {audio_file}")
+        return audio_file
+    loops_needed = int(target_duration / original_duration) + 1
+    full_audio = audio * loops_needed  # Repeat the audio
+    trimmed_audio = full_audio[:int(target_duration * 1000)]
+    try:
+        trimmed_audio.export(looped_path, format="mp3")
+        logging.info(f"Created looped audio: {looped_name}")
+        return looped_path
+    except Exception as e:
+        logging.error(f"Failed exporting looped audio: {e}")
+        return audio_file  # fallback
+
+def trim_audio(audio_file, max_duration=30):
+    """
+    Trims the given audio file to a maximum duration (in seconds).
+    Caches the result if possible.
+    Returns the path to the trimmed audio file.
+    """
+    base, ext = os.path.splitext(os.path.basename(audio_file))
+    trimmed_name = f"trimmed_{base}_{int(max_duration)}s.mp3"
+    trimmed_path = os.path.join(BASE_DIR, trimmed_name)
+
+    # If exists with correct (<=) duration, skip re-processing
+    if os.path.exists(trimmed_path):
+        dur = get_audio_duration(trimmed_path)
+        if dur is not None and dur <= max_duration + 0.1:
+            logging.info(f"Using cached trimmed audio: {trimmed_name}")
+            return trimmed_path
+        else:
+            try:
+                os.remove(trimmed_path)
+            except Exception:
+                pass
+
+    # Perform trimming
+    try:
+        audio = AudioSegment.from_file(audio_file)
+    except Exception as e:
+        logging.error(f"Error loading audio file {audio_file}: {e}")
+        return audio_file
+    trimmed_audio = audio[:max_duration * 1000]  # Trim to max_duration seconds
+    try:
+        trimmed_audio.export(trimmed_path, format="mp3")
+        logging.info(f"Created trimmed audio: {trimmed_name}")
+        return trimmed_path
+    except Exception as e:
+        logging.error(f"Failed exporting trimmed audio: {e}")
+        return audio_file
+
+# === END: Performance enhancements ===
+
+
 def fetch_quote():
     """Fetches a random motivational quote from ZenQuotes API."""
     global quote_data
-    if quote_data is not None:
-        return quote_data
-
+    # Always fetch a fresh quote; do not reuse previous quote_data
     url = "https://zenquotes.io/api/random"
     try:
         response = requests.get(url, timeout=10)
@@ -31,21 +218,46 @@ def fetch_quote():
         data = response.json()
         logging.info(f"Fetched data: {data}")
         if isinstance(data, list) and data:
-            quote_data = {"quote": data[0].get("q", "No quote found"),
-                          "author": data[0].get("a", "Unknown")}
-            return quote_data
+            result = {"quote": data[0].get("q", "No quote found"),
+                      "author": data[0].get("a", "Unknown")}
+            quote_data = result
+            return result
     except requests.exceptions.RequestException as e:
         logging.error(f"Error fetching quote: {e}")
-    
-    quote_data = {"quote": "No quote found", "author": "Unknown"}
-    return quote_data
+    # On error, still update global to avoid stale
+    result = {"quote": "No quote found", "author": "Unknown"}
+    quote_data = result
+    return result
 
 def fetch_voiceover(quote, api_key):
-    """Fetches voiceover for the given quote using VoiceRSS API (and caches result)."""
-    global voiceover_file
-    if voiceover_file is not None and os.path.exists(voiceover_file):
+    """Fetches voiceover for the given quote using VoiceRSS API (and caches per-quote)."""
+    global voiceover_file, _voiceover_cached_quote
+
+    # If we have cached quote and it matches current quote, and file exists, reuse
+    if _voiceover_cached_quote == quote and voiceover_file and os.path.exists(voiceover_file):
+        logging.info(f"Reusing cached voiceover for the same quote: {voiceover_file}")
         return voiceover_file
 
+    # Otherwise: need to fetch a new voiceover
+    # Remove old cached file if it exists
+    if voiceover_file and os.path.exists(voiceover_file):
+        try:
+            os.remove(voiceover_file)
+            logging.info("Removed previous cached voiceover file")
+        except Exception as e:
+            logging.warning(f"Could not remove old cached voiceover: {e}")
+    # Also if VOICEOVER_FILENAME exists from disk but was for a different quote, remove it
+    if os.path.exists("voiceover.mp3") and _voiceover_cached_quote != quote:
+        try:
+            os.remove("voiceover.mp3")
+            logging.info("Removed existing voiceover.mp3 on disk since quote changed")
+        except Exception:
+            pass
+
+    voiceover_file = None
+    _voiceover_cached_quote = None
+
+    # Download new voiceover for the current quote
     url = "https://api.voicerss.org/"
     params = {
         "key": api_key,
@@ -63,8 +275,10 @@ def fetch_voiceover(quote, api_key):
         file_path = "voiceover.mp3"
         with open(file_path, "wb") as f:
             f.write(response.content)
+        logging.info(f"Downloaded new voiceover to {file_path}")
         voiceover_file = file_path
-        return file_path
+        _voiceover_cached_quote = quote
+        return voiceover_file
     except requests.exceptions.RequestException as e:
         logging.error(f"Error fetching voiceover: {e}")
     return None
@@ -92,82 +306,54 @@ def create_quote_mobjects(quote_text, quote_author, frame_width, frame_height):
     
     return quote_mobject, author_mobject
 
-def get_audio_duration(audio_file):
-    """Returns the duration (in seconds) of the given audio file using pydub."""
-    audio = AudioSegment.from_file(audio_file, format="mp3")
-    duration_seconds = len(audio) / 1000.0
-    return duration_seconds
-
-def loop_sound(audio_file, target_duration):
-    """
-    Loops the given audio file (mp3 or ogg) until the target_duration (in seconds)
-    is reached, then trims it to exactly target_duration.
-    Returns the path to the resulting audio file.
-    """
-    audio = AudioSegment.from_file(audio_file)  # pydub infers the format
-    original_duration = len(audio) / 1000.0
-    loops_needed = int(target_duration / original_duration) + 1
-    full_audio = audio * loops_needed  # Repeat the audio
-    trimmed_audio = full_audio[:int(target_duration * 1000)]
-    looped_path = "looped_" + os.path.basename(audio_file).split('.')[0] + ".mp3"
-    trimmed_audio.export(looped_path, format="mp3")
-    return looped_path
-
-def trim_audio(audio_file, max_duration=30):
-    """
-    Trims the given audio file to a maximum duration (in seconds).
-    Returns the path to the trimmed audio file.
-    """
-    audio = AudioSegment.from_file(audio_file)
-    trimmed_audio = audio[:max_duration * 1000]  # Trim to max_duration seconds
-    trimmed_path = "trimmed_" + os.path.basename(audio_file)
-    trimmed_audio.export(trimmed_path, format="mp3")
-    return trimmed_path
-
-def extract_video_frames(video_file, fps=30):
-    """
-    Extracts frames from the given video file using FFmpeg with subprocess.
-    Returns a list of frame file paths.
-    """
-    output_dir = "video_frames"
-    os.makedirs(output_dir, exist_ok=True)
-    
-    frame_pattern = os.path.join(output_dir, "frame%03d.png")
-    command = ["ffmpeg", "-i", video_file, "-vf", f"fps={fps}", frame_pattern]
-    subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-    
-    frame_files = [os.path.join(output_dir, f) for f in os.listdir(output_dir) if f.endswith(".png")]
-    return sorted(frame_files)
-
 class AnimatedQuoteWithBackground(Scene):
     def construct(self):
         # Set total duration of the scene (in seconds)
         total_duration = 7
 
         # Add looping background sound (trimmed to total_duration)
-        cool_effect_file = "subclip.ogg"
-        looped_effect = loop_sound(cool_effect_file, total_duration)
+        cool_effect_file = SOUND_FILENAME  # "subclip.ogg"
+        looped_effect = loop_sound(SOUND_PATH, total_duration)
         self.add_sound(looped_effect, gain=-5)
 
         # Extract video frames from background video
-        video_background_file = "219305_tiny.mp4"
-        video_frames = extract_video_frames(video_background_file, fps=30)
-        
+        video_background_file = VIDEO_FILENAME  # "219305_tiny.mp4"
+        video_frames = extract_video_frames(VIDEO_PATH, fps=30)
+
         # Instead of animating every frame, select a subset.
         # Aim for one frame transition every ~2 seconds.
         desired_transitions = int(total_duration // 2)
-        frame_interval = max(1, len(video_frames) // desired_transitions)
-        selected_frames = video_frames[::frame_interval]
-        
-        # Create initial background image from the first selected frame.
-        bg_image = ImageMobject(selected_frames[0]).scale(4)
-        self.add(bg_image)
-        
+        if video_frames:
+            frame_interval = max(1, len(video_frames) // desired_transitions)
+        else:
+            frame_interval = 1
+        selected_frames = video_frames[::frame_interval] if video_frames else []
+
+        # Preload ImageMobject instances for smoother playback
+        bg_mobjects = []
+        for frame_path in selected_frames:
+            try:
+                mob = ImageMobject(frame_path).scale(4)
+                bg_mobjects.append(mob)
+            except Exception as e:
+                logging.warning(f"Failed to load frame {frame_path}: {e}")
+
+        if bg_mobjects:
+            # Add all with opacity=0, then show the first
+            for mob in bg_mobjects:
+                mob.set_opacity(0)
+                self.add(mob)
+            bg_mobjects[0].set_opacity(1)
+            bg_image = bg_mobjects[0]
+        else:
+            bg_image = None
+            logging.warning("No background frames available.")
+
         # Fetch quote
         quote_info = fetch_quote()
         quote_text = f"\"{quote_info['quote']}\""
         quote_author = f"{quote_info['author']}"
-        
+
         # Create quote text objects
         quote_mobject, author_mobject = create_quote_mobjects(
             quote_text, quote_author, self.camera.frame_width, self.camera.frame_height
@@ -199,17 +385,21 @@ class AnimatedQuoteWithBackground(Scene):
 
         # Animate background transitions over the selected frames.
         bg_transition_time = 0.5
-        for frame in selected_frames[1:]:
-            new_bg = ImageMobject(frame).scale(4)
-            self.play(Transform(bg_image, new_bg), run_time=bg_transition_time)
+        if bg_image:
+            for next_mob in bg_mobjects[1:]:
+                # Transition opacity: fade out current bg_image, fade in next_mob
+                self.play(
+                    bg_image.animate.set_opacity(0),
+                    next_mob.animate.set_opacity(1),
+                    run_time=bg_transition_time
+                )
+                bg_image = next_mob
 
         # Calculate total animation time spent.
         time_text = time_fadein + time_write + time_color + time_scale + time_author
-        time_bg = (len(selected_frames) - 1) * bg_transition_time
+        time_bg = (len(bg_mobjects) - 1) * bg_transition_time if bg_mobjects else 0
         time_used = time_text + time_bg
 
         # Wait the remaining time so that the full scene lasts exactly total_duration.
         remaining_time = max(0, total_duration - time_used)
         self.wait(remaining_time)
-
-
