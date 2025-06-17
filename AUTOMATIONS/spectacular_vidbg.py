@@ -1,11 +1,14 @@
 from manim import *
+from manim import config
 import requests
 import logging
 import os
+from io import BytesIO
+from PIL import Image
 import textwrap
+from pydub import AudioSegment
 import subprocess
 import json
-from pydub import AudioSegment
 
 # Set up logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
@@ -14,11 +17,11 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(
 cat_api_key = os.environ.get("CAT_API_KEY")
 voice_api_key = os.environ.get("VOICE_RSS_API_KEY")
 
-# Global variables to store fetched data (avoiding redundant calls)
+# Global variables (no longer used for caching, but kept for structure)
 quote_data = None
 voiceover_file = None
 
-# Introduce a new global to track the last quote used for voiceover caching
+# Introduce a new global to track the last quote used for voiceover caching (not used for caching here)
 _voiceover_cached_quote = None
 
 # === BEGIN: Performance enhancements ===
@@ -38,18 +41,15 @@ METADATA_PATH = os.path.join(FRAMES_DIR, "frames_meta.json")
 
 def load_frames_metadata():
     """Load metadata dict from METADATA_PATH if exists; else return None."""
-    if os.path.exists(METADATA_PATH):
-        try:
-            with open(METADATA_PATH, "r", encoding="utf-8") as f:
-                return json.load(f)
-        except Exception as e:
-            logging.warning(f"Could not read frames metadata: {e}")
+    # CACHING DISABLED: always return None
     return None
 
 def save_frames_metadata(video_path, mtime):
     """Save metadata about extracted frames."""
+    # CACHING DISABLED: still write metadata if desired, but it won't be used
     data = {"video_path": video_path, "mtime": mtime}
     try:
+        os.makedirs(os.path.dirname(METADATA_PATH), exist_ok=True)
         with open(METADATA_PATH, "w", encoding="utf-8") as f:
             json.dump(data, f)
     except Exception as e:
@@ -58,7 +58,7 @@ def save_frames_metadata(video_path, mtime):
 def extract_video_frames(video_file, fps=30):
     """
     Extracts frames from the given video file using FFmpeg with subprocess.
-    Caches extracted frames based on the video's modification time.
+    CACHING DISABLED: always re-extract frames.
     Returns a list of frame file paths (absolute).
     """
     output_dir = FRAMES_DIR
@@ -72,7 +72,6 @@ def extract_video_frames(video_file, fps=30):
 
     # --- CACHING DISABLED: always re-extract frames ---
     # Remove any cached metadata file
-    # (If you wish, you can still write metadata, but it won't be used in checks below.)
     try:
         if os.path.exists(METADATA_PATH):
             os.remove(METADATA_PATH)
@@ -121,7 +120,7 @@ def loop_sound(audio_file, target_duration):
     """
     Loops the given audio file (mp3 or ogg) until the target_duration (in seconds)
     is reached, then trims it to exactly target_duration.
-    Caches the result if identical looped file exists.
+    CACHING DISABLED: always recreate the looped audio.
     Returns the path to the resulting audio file.
     """
     # Name for looped file: include target_duration in name
@@ -163,7 +162,7 @@ def loop_sound(audio_file, target_duration):
 def trim_audio(audio_file, max_duration=30):
     """
     Trims the given audio file to a maximum duration (in seconds).
-    Caches the result if possible.
+    CACHING DISABLED: always recreate trimmed audio.
     Returns the path to the trimmed audio file.
     """
     base, ext = os.path.splitext(os.path.basename(audio_file))
@@ -219,7 +218,7 @@ def fetch_quote():
     return result
 
 def fetch_voiceover(quote, api_key):
-    """Fetches voiceover for the given quote using VoiceRSS API (and caches per-quote)."""
+    """Fetches voiceover for the given quote using VoiceRSS API (always fetch new)."""
     global voiceover_file, _voiceover_cached_quote
 
     # Always fetch new voiceover for the quote
@@ -297,6 +296,7 @@ class AnimatedQuoteWithBackground(Scene):
 
         # Add looping background sound (trimmed to total_duration)
         cool_effect_file = SOUND_FILENAME  # "subclip.ogg"
+        # Always regenerate looped sound
         looped_effect = loop_sound(SOUND_PATH, total_duration)
         self.add_sound(looped_effect, gain=-5)
 
