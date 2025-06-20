@@ -9,6 +9,9 @@ import textwrap
 from pydub import AudioSegment
 import subprocess
 import json
+import random  # for random choice in Pexels results
+import tempfile  # for temporary download if desired
+import shutil
 
 # Set up logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
@@ -16,6 +19,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(
 # Load API keys from environment variables
 cat_api_key = os.environ.get("CAT_API_KEY")
 voice_api_key = os.environ.get("VOICE_RSS_API_KEY")
+PEXELS_API_KEY = os.environ.get("PEXELS_API_KEY")
 
 # Global variables (no longer used for caching, but kept for structure)
 quote_data = None
@@ -29,7 +33,7 @@ _voiceover_cached_quote = None
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 # Default filenames (unchanged functionality)
-VIDEO_FILENAME = "219305_tiny.mp4"
+VIDEO_FILENAME = "46026-447087782_medium.mp4"
 SOUND_FILENAME = "subclip.ogg"
 
 VIDEO_PATH = os.path.join(BASE_DIR, VIDEO_FILENAME)
@@ -108,6 +112,10 @@ def extract_video_frames(video_file, fps=30):
 
 def get_audio_duration(audio_file):
     """Returns the duration (in seconds) of the given audio file using pydub."""
+    # DEFENSIVE CHECK: ensure file exists
+    if not os.path.exists(audio_file):
+        logging.warning(f"get_audio_duration: file not found: {audio_file}")
+        return None
     try:
         audio = AudioSegment.from_file(audio_file, format="mp3")
         duration_seconds = len(audio) / 1000.0
@@ -121,8 +129,13 @@ def loop_sound(audio_file, target_duration):
     Loops the given audio file (mp3 or ogg) until the target_duration (in seconds)
     is reached, then trims it to exactly target_duration.
     CACHING DISABLED: always recreate the looped audio.
-    Returns the path to the resulting audio file.
+    Returns the path to the resulting audio file, or None on failure.
     """
+    # DEFENSIVE CHECK: ensure input exists
+    if not os.path.exists(audio_file):
+        logging.warning(f"loop_sound: input audio file does not exist: {audio_file}")
+        return None
+
     # Name for looped file: include target_duration in name
     base, ext = os.path.splitext(os.path.basename(audio_file))
     looped_name = f"looped_{base}_{int(target_duration)}s.mp3"
@@ -142,12 +155,12 @@ def loop_sound(audio_file, target_duration):
         audio = AudioSegment.from_file(audio_file)
     except Exception as e:
         logging.error(f"Error loading audio file {audio_file}: {e}")
-        return audio_file  # fallback
+        return None  # fallback
 
     original_duration = len(audio) / 1000.0
     if original_duration <= 0:
         logging.warning(f"Original audio has zero length: {audio_file}")
-        return audio_file
+        return None
     loops_needed = int(target_duration / original_duration) + 1
     full_audio = audio * loops_needed  # Repeat the audio
     trimmed_audio = full_audio[:int(target_duration * 1000)]
@@ -157,14 +170,19 @@ def loop_sound(audio_file, target_duration):
         return looped_path
     except Exception as e:
         logging.error(f"Failed exporting looped audio: {e}")
-        return audio_file  # fallback
+        return None  # fallback
 
 def trim_audio(audio_file, max_duration=30):
     """
     Trims the given audio file to a maximum duration (in seconds).
     CACHING DISABLED: always recreate trimmed audio.
-    Returns the path to the trimmed audio file.
+    Returns the path to the trimmed audio file, or None on failure.
     """
+    # DEFENSIVE CHECK: ensure input exists
+    if not os.path.exists(audio_file):
+        logging.warning(f"trim_audio: input audio file does not exist: {audio_file}")
+        return None
+
     base, ext = os.path.splitext(os.path.basename(audio_file))
     trimmed_name = f"trimmed_{base}_{int(max_duration)}s.mp3"
     trimmed_path = os.path.join(BASE_DIR, trimmed_name)
@@ -182,7 +200,7 @@ def trim_audio(audio_file, max_duration=30):
         audio = AudioSegment.from_file(audio_file)
     except Exception as e:
         logging.error(f"Error loading audio file {audio_file}: {e}")
-        return audio_file
+        return None
     trimmed_audio = audio[:max_duration * 1000]  # Trim to max_duration seconds
     try:
         trimmed_audio.export(trimmed_path, format="mp3")
@@ -190,10 +208,9 @@ def trim_audio(audio_file, max_duration=30):
         return trimmed_path
     except Exception as e:
         logging.error(f"Failed exporting trimmed audio: {e}")
-        return audio_file
+        return None
 
 # === END: Performance enhancements ===
-
 
 def fetch_quote():
     """Fetches a random motivational quote from ZenQuotes API."""
@@ -289,6 +306,83 @@ def create_quote_mobjects(quote_text, quote_author, frame_width, frame_height):
     
     return quote_mobject, author_mobject
 
+def fetch_pexels_video(query="nature", per_page=15):
+    """
+    Fetch a random short video from Pexels matching `query`. Downloads it locally
+    (overwriting any previous fetch at a fixed filename), and returns the local file path.
+    If PEXELS_API_KEY is not set or any error occurs, returns None.
+    """
+    if not PEXELS_API_KEY:
+        logging.warning("PEXELS_API_KEY not set; cannot fetch background video from Pexels.")
+        return None
+    search_url = "https://api.pexels.com/videos/search"
+    headers = {"Authorization": PEXELS_API_KEY}
+    params = {"query": query, "per_page": per_page, "page": 1}
+    try:
+        resp = requests.get(search_url, headers=headers, params=params, timeout=10)
+        resp.raise_for_status()
+        data = resp.json()
+    except Exception as e:
+        logging.error(f"Error searching Pexels videos for '{query}': {e}")
+        return None
+
+    videos = data.get("videos", [])
+    if not videos:
+        logging.warning(f"No Pexels videos found for query: {query}")
+        return None
+
+    # Pick a random video from results
+    choice = random.choice(videos)
+    video_files = choice.get("video_files", [])
+    if not video_files:
+        logging.warning(f"No video_files entries in chosen Pexels result for '{query}'")
+        return None
+
+    # Prefer medium quality if available, else pick random
+    file_url = None
+    # Try to pick a medium resolution
+    for vf in video_files:
+        if vf.get("quality") == "sd" and vf.get("link"):
+            file_url = vf["link"]
+            break
+    if not file_url:
+        # fallback to any available link
+        candidates = [vf.get("link") for vf in video_files if vf.get("link")]
+        if candidates:
+            file_url = random.choice(candidates)
+    if not file_url:
+        logging.warning(f"No download URL found for Pexels video for '{query}'")
+        return None
+
+    # Download video to a fixed local path, e.g., "pexels_bg.mp4" in BASE_DIR
+    local_filename = os.path.join(BASE_DIR, "pexels_bg.mp4")
+    try:
+        logging.info(f"Downloading Pexels video for background: {file_url}")
+        with requests.get(file_url, stream=True, timeout=30) as r:
+            r.raise_for_status()
+            # write to temp then move
+            tmp_path = local_filename + ".part"
+            with open(tmp_path, "wb") as f:
+                for chunk in r.iter_content(chunk_size=1024*1024):
+                    f.write(chunk)
+            # Replace any previous
+            if os.path.exists(local_filename):
+                try:
+                    os.remove(local_filename)
+                except Exception:
+                    pass
+            os.rename(tmp_path, local_filename)
+        logging.info(f"Saved Pexels background video to: {local_filename}")
+        return local_filename
+    except Exception as e:
+        logging.error(f"Failed to download Pexels video {file_url}: {e}")
+        try:
+            if os.path.exists(local_filename + ".part"):
+                os.remove(local_filename + ".part")
+        except Exception:
+            pass
+        return None
+
 class AnimatedQuoteWithBackground(Scene):
     def construct(self):
         # Set total duration of the scene (in seconds)
@@ -296,13 +390,30 @@ class AnimatedQuoteWithBackground(Scene):
 
         # Add looping background sound (trimmed to total_duration)
         cool_effect_file = SOUND_FILENAME  # "subclip.ogg"
-        # Always regenerate looped sound
-        looped_effect = loop_sound(SOUND_PATH, total_duration)
-        self.add_sound(looped_effect, gain=-5)
+        # Always regenerate looped sound, but defensively check existence
+        if os.path.exists(SOUND_PATH):
+            looped_effect = loop_sound(SOUND_PATH, total_duration)
+            if looped_effect and os.path.exists(looped_effect):
+                self.add_sound(looped_effect, gain=-5)
+            else:
+                logging.warning(f"Could not create or find looped audio from {SOUND_PATH}")
+        else:
+            logging.warning(f"Background sound file not found at {SOUND_PATH}; skipping background audio.")
+
+        # === New: attempt to fetch background video from Pexels ===
+        # Use environment variable PEXELS_VIDEO_QUERY if set, else default "nature"
+        pexels_query = os.environ.get("PEXELS_VIDEO_QUERY", "nature")
+        fetched_video = fetch_pexels_video(pexels_query)
+        if fetched_video and os.path.exists(fetched_video):
+            video_background_file = fetched_video
+            logging.info(f"Using fetched Pexels video: {video_background_file}")
+        else:
+            # Fallback to static VIDEO_PATH
+            video_background_file = VIDEO_PATH
+            logging.info(f"Falling back to static background video: {video_background_file}")
 
         # Extract video frames from background video
-        video_background_file = VIDEO_FILENAME  # "219305_tiny.mp4"
-        video_frames = extract_video_frames(VIDEO_PATH, fps=30)
+        video_frames = extract_video_frames(video_background_file, fps=30)
 
         # Instead of animating every frame, select a subset.
         # Aim for one frame transition every ~2 seconds.
@@ -347,11 +458,16 @@ class AnimatedQuoteWithBackground(Scene):
 
         # Fetch and trim voiceover BEFORE animating text, so both play concurrently.
         audio_file = fetch_voiceover(quote_text, voice_api_key)
-        if audio_file:
-            audio_file = trim_audio(audio_file, max_duration=total_duration)
-            voiceover_duration = get_audio_duration(audio_file)
-            self.add_sound(audio_file, gain=+10)
+        if audio_file and os.path.exists(audio_file):
+            trimmed = trim_audio(audio_file, max_duration=total_duration)
+            if trimmed and os.path.exists(trimmed):
+                voiceover_duration = get_audio_duration(trimmed) or 0
+                self.add_sound(trimmed, gain=+10)
+            else:
+                logging.warning(f"Failed to trim or find trimmed voiceover from {audio_file}")
+                voiceover_duration = 0
         else:
+            logging.warning("No voiceover file fetched; skipping voiceover.")
             voiceover_duration = 0
 
         # Animate text appearance with reduced run times.
