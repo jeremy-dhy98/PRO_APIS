@@ -25,13 +25,16 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 BG_VIDEOS_DIR = os.environ.get("BG_VIDEOS_DIR", os.path.join(BASE_DIR, "bg_videos"))
 BG_SOUNDS_DIR = os.environ.get("BG_SOUNDS_DIR", os.path.join(BASE_DIR, "bg_sounds"))
 FRAMES_DIR = os.path.join(BASE_DIR, "video_frames")
-EXPECTED_VIDEO = os.path.join(BASE_DIR, "219305_tiny.mp4")   # This will be overwritten by downloaded file
+EXPECTED_VIDEO = os.path.join(BASE_DIR, "219305_tiny.mp4")   # Will be overwritten by downloaded file
 EXPECTED_SOUND = os.path.join(BASE_DIR, "subclip.ogg")
 CAT_IMAGE_FILENAME = "cat_image.jpg"
 
 os.makedirs(BG_VIDEOS_DIR, exist_ok=True)
 os.makedirs(BG_SOUNDS_DIR, exist_ok=True)
 os.makedirs(FRAMES_DIR, exist_ok=True)
+
+# --- Topics to choose from ---
+TOPIC_CHOICES = ["nature", "birds", "art"]
 
 # --- Globals ---
 quote_data = None
@@ -40,7 +43,6 @@ _voiceover_cached_quote = None
 
 # ---------- New: background fetch helpers ----------
 def _download_stream_to(path, url, headers=None, timeout=30):
-    """Stream-download URL to path.part then rename to path on success."""
     tmp = path + ".part"
     try:
         with requests.get(url, stream=True, headers=(headers or {}), timeout=timeout) as r:
@@ -49,7 +51,6 @@ def _download_stream_to(path, url, headers=None, timeout=30):
                 for chunk in r.iter_content(chunk_size=1024 * 1024):
                     if chunk:
                         f.write(chunk)
-        # Move into final path
         if os.path.exists(path):
             try:
                 os.remove(path)
@@ -68,12 +69,8 @@ def _download_stream_to(path, url, headers=None, timeout=30):
         return False
 
 def fetch_pexels_video(query="nature", per_page=15):
-    """
-    Fetch one short video from Pexels matching `query` and save it to EXPECTED_VIDEO.
-    Returns EXPECTED_VIDEO on success, None on failure.
-    """
     if not PEXELS_API_KEY:
-        logging.info("PEXELS_API_KEY not set; skipping Pexels fetch.")
+        logging.info("PEXABLS_API_KEY not set; skipping Pexels fetch.")
         return None
     search_url = "https://api.pexels.com/videos/search"
     headers = {"Authorization": PEXELS_API_KEY}
@@ -91,21 +88,20 @@ def fetch_pexels_video(query="nature", per_page=15):
         logging.info("Pexels search returned no videos.")
         return None
 
-    # Shuffle so we try a random video
     random.shuffle(videos)
     for choice in videos:
         video_files = choice.get("video_files", [])
         if not video_files:
             continue
 
-        # Prefer sd or medium quality to keep size reasonable
         file_url = None
+        # Prefer small/SD links to keep size reasonable
         for vf in video_files:
-            if vf.get("quality") in ("sd", "sd720", "sd_720") and vf.get("link"):
+            q = vf.get("quality", "").lower()
+            if q in ("sd", "sd720", "sd_720", "small") and vf.get("link"):
                 file_url = vf["link"]
                 break
         if not file_url:
-            # fallback to any available link
             candidates = [vf.get("link") for vf in video_files if vf.get("link")]
             if candidates:
                 file_url = random.choice(candidates)
@@ -113,17 +109,19 @@ def fetch_pexels_video(query="nature", per_page=15):
         if not file_url:
             continue
 
-        logging.info(f"Pexels: trying to download {file_url}")
+        logging.info(f"Pexels: trying to download {file_url} for query='{query}'")
+        # ensure we always overwrite EXPECTED_VIDEO to force fresh file
+        try:
+            if os.path.exists(EXPECTED_VIDEO):
+                os.remove(EXPECTED_VIDEO)
+        except Exception:
+            pass
         success = _download_stream_to(EXPECTED_VIDEO, file_url, headers=headers)
         if success and os.path.exists(EXPECTED_VIDEO):
             return EXPECTED_VIDEO
     return None
 
 def fetch_pixabay_video(query="nature", per_page=20):
-    """
-    Fetch one video from Pixabay for `query` and save to EXPECTED_VIDEO.
-    Returns EXPECTED_VIDEO on success, None on failure.
-    """
     if not PIXABAY_API_KEY:
         logging.info("PIXABAY_API_KEY not set; skipping Pixabay fetch.")
         return None
@@ -146,41 +144,41 @@ def fetch_pixabay_video(query="nature", per_page=20):
     for hit in hits:
         vids = hit.get("videos", {})
         file_url = None
-        # prefer medium/large
         for size in ("medium", "large", "small", "tiny"):
             if vids.get(size) and vids[size].get("url"):
                 file_url = vids[size]["url"]
                 break
         if not file_url:
             continue
-        logging.info(f"Pixabay: trying to download {file_url}")
+
+        logging.info(f"Pixabay: trying to download {file_url} for query='{query}'")
+        try:
+            if os.path.exists(EXPECTED_VIDEO):
+                os.remove(EXPECTED_VIDEO)
+        except Exception:
+            pass
         success = _download_stream_to(EXPECTED_VIDEO, file_url)
         if success and os.path.exists(EXPECTED_VIDEO):
             return EXPECTED_VIDEO
     return None
 
-def fetch_background_video(query="nature"):
-    """
-    Try Pexels first, then Pixabay. Returns path to downloaded video or None.
-    Always attempts to download a fresh file and overwrite EXPECTED_VIDEO.
-    """
-    logging.info(f"Attempting to fetch fresh background video for query: '{query}'")
-    # Try Pexels first
-    path = fetch_pexels_video(query=query)
+def fetch_background_video_for_topic(topic):
+    logging.info(f"Attempting to fetch fresh background video for topic: '{topic}'")
+    # Try Pexels first, then Pixabay
+    path = fetch_pexels_video(query=topic)
     if path:
         logging.info("Fetched background from Pexels.")
         return path
-    # Fallback to Pixabay
-    path = fetch_pixabay_video(query=query)
+    path = fetch_pixabay_video(query=topic)
     if path:
         logging.info("Fetched background from Pixabay.")
         return path
-    logging.warning("Could not fetch background from Pexels or Pixabay.")
+    logging.warning("Could not fetch background from Pexels or Pixabay for topic '%s'." % topic)
     return None
 
 # ---------- End background fetch helpers ----------
 
-# --- (the rest of your existing helpers follow unchanged) ---
+# --- (other helpers unchanged — tts, audio, frames, display utilities) ---
 def _create_silent_audio(duration_seconds, out_path="voiceover.mp3"):
     ms = int(duration_seconds * 1000)
     silent = AudioSegment.silent(duration=ms)
@@ -437,14 +435,84 @@ def create_quote_mobjects(quote_text, quote_author, frame_width, frame_height):
     a.set_color(YELLOW)
     return q, a
 
-# === Scene using the fast background display (now fetches a fresh nature video each run) ===
+# === Scene using the fast background display (now picks a random topic and fetches fresh media each run) ===
 class AnimatedQuoteWithBackground(Scene):
     def construct(self):
-        total_duration = 7
+        # We'll set total_duration from the voiceover length below.
+        # Default fallback:
+        total_duration = 7.0
 
-        # Step 0: Always attempt to fetch a fresh nature background (overwrites EXPECTED_VIDEO)
-        BG_QUERY = os.environ.get("BG_QUERY", "nature")
-        fetched = fetch_background_video(BG_QUERY)
+        # Step 0: choose topic at random (or use BG_QUERY env var to override)
+        env_topic = os.environ.get("BG_QUERY")
+        if env_topic:
+            topic = env_topic
+            logging.info(f"BG_QUERY provided via env: '{topic}'")
+        else:
+            topic = random.choice(TOPIC_CHOICES)
+            logging.info(f"No BG_QUERY set — randomly selected topic: '{topic}'")
+
+        # Fetch quote & TTS first so we can set scene duration from voice length
+        qinfo = fetch_quote()
+        raw = qinfo.get('quote', 'No quote found')
+        display_q = f'"{raw}"'
+        author = qinfo.get('author', 'Unknown')
+
+        # Fetch voiceover (this will write voiceover.mp3 or fallback silent file)
+        audio = fetch_voiceover(raw, voice_api_key)
+        measured_voice_dur = None
+        if audio and os.path.exists(audio):
+            try:
+                measured_voice_dur = AudioSegment.from_file(audio).duration_seconds
+                logging.info(f"Measured voiceover duration: {measured_voice_dur:.2f}s")
+            except Exception as e:
+                logging.warning(f"Could not measure voiceover duration: {e}")
+                measured_voice_dur = None
+
+        # Determine total_duration from voiceover length (with small padding) if available
+        if measured_voice_dur and measured_voice_dur > 0:
+            # add small padding to avoid premature cut
+            total_duration = float(measured_voice_dur) + 0.25
+            # cap to something reasonable
+            if total_duration > 120:
+                total_duration = 120.0
+            logging.info(f"Setting scene total_duration to voice length + padding: {total_duration:.2f}s")
+        else:
+            logging.info(f"Using fallback total_duration: {total_duration:.2f}s")
+
+        # ---- CLEAR EXISTING MEDIA (but never delete a file named 'subclip.ogg') ----
+        # Clear BG_VIDEOS_DIR and BG_SOUNDS_DIR so fresh downloads happen each run.
+        def _clear_dir_but_keep_subclip(dirpath):
+            try:
+                for name in os.listdir(dirpath):
+                    full = os.path.join(dirpath, name)
+                    # skip if this file is named 'subclip.ogg'
+                    if os.path.basename(full) == os.path.basename(EXPECTED_SOUND):
+                        logging.info(f"Skipping removal of {full} (subclip.ogg protected).")
+                        continue
+                    try:
+                        if os.path.isfile(full) or os.path.islink(full):
+                            os.remove(full)
+                        elif os.path.isdir(full):
+                            shutil.rmtree(full)
+                    except Exception:
+                        pass
+            except FileNotFoundError:
+                pass
+
+        logging.info("Clearing background media directories (preserving any 'subclip.ogg').")
+        _clear_dir_but_keep_subclip(BG_VIDEOS_DIR)
+        _clear_dir_but_keep_subclip(BG_SOUNDS_DIR)
+
+        # Clear frames directory (safe to remove everything)
+        try:
+            if os.path.exists(FRAMES_DIR):
+                shutil.rmtree(FRAMES_DIR)
+        except Exception:
+            pass
+        os.makedirs(FRAMES_DIR, exist_ok=True)
+
+        # Always attempt to fetch a fresh video for the chosen topic (overwrites EXPECTED_VIDEO)
+        fetched = fetch_background_video_for_topic(topic)
         if fetched:
             logging.info(f"Using freshly downloaded background: {fetched}")
         else:
@@ -453,13 +521,15 @@ class AnimatedQuoteWithBackground(Scene):
             else:
                 logging.warning("No background video available. Scene will attempt to proceed without video frames.")
 
-        # Prepare/loop background sound
+        # Prepare/loop background sound (unchanged) - use total_duration now
         if os.path.exists(EXPECTED_SOUND):
             looped = loop_sound(EXPECTED_SOUND, total_duration)
             if looped and os.path.exists(looped):
                 self.add_sound(looped, gain=-5)
+        else:
+            logging.info("No EXPECTED_SOUND found; skipping background loop sound.")
 
-        # Ensure dense frames exist: extract if FRAMES_DIR empty
+        # Pre-extract dense frames if missing
         if not any(f.endswith('.png') for f in os.listdir(FRAMES_DIR)):
             if os.path.exists(EXPECTED_VIDEO):
                 pre_extract_frames(EXPECTED_VIDEO, FRAMES_DIR, src_fps=60, tgt_fps=60, max_frames=600)
@@ -468,11 +538,10 @@ class AnimatedQuoteWithBackground(Scene):
 
         frames = extract_video_frames(EXPECTED_VIDEO, fps=60)
 
-        # Choose parameters for rapid display
-        use_pool = True  # set False to use on-the-fly loading sequence instead
-        frame_display_time = 0.02  # 50 FPS displayed
+        # Display fast background (pool updater default)
+        use_pool = True
+        frame_display_time = 0.02
         max_fast_frames = 300
-
         selected = frames[:max_fast_frames]
 
         bg_container = None
@@ -484,21 +553,25 @@ class AnimatedQuoteWithBackground(Scene):
         else:
             logging.warning("No frames available for fast background")
 
-        # Quote + voiceover
-        qinfo = fetch_quote()
-        raw = qinfo.get('quote', 'No quote found')
-        display_q = f'"{raw}"'
-        author = qinfo.get('author', 'Unknown')
-
+        # Prepare text mobjects
         q_mobj, a_mobj = create_quote_mobjects(display_q, author, self.camera.frame_width, self.camera.frame_height)
         q_mobj.move_to(UP * 0.5)
         a_mobj.next_to(q_mobj, DOWN, buff=0.4)
 
-        audio = fetch_voiceover(raw, voice_api_key)
+        # Add the voiceover (trim if needed to exact scene duration)
         if audio and os.path.exists(audio):
-            trimmed = trim_audio(audio, max_duration=total_duration)
-            if trimmed and os.path.exists(trimmed):
-                self.add_sound(trimmed, gain=+10)
+            # If voiceover is longer than total_duration (unlikely since we based total on voice length),
+            # trim to total_duration; otherwise keep it.
+            try:
+                voice_dur = AudioSegment.from_file(audio).duration_seconds
+            except Exception:
+                voice_dur = None
+            if voice_dur and voice_dur > total_duration + 0.001:
+                trimmed = trim_audio(audio, max_duration=total_duration)
+                if trimmed and os.path.exists(trimmed):
+                    self.add_sound(trimmed, gain=+10)
+            else:
+                self.add_sound(audio, gain=+10)
 
         # Animate text
         t_fadein = 0.8
@@ -513,16 +586,17 @@ class AnimatedQuoteWithBackground(Scene):
         self.play(q_mobj.animate.scale(1.1), run_time=t_scale)
         self.play(FadeIn(a_mobj, shift=UP), run_time=t_author)
 
-        # Compute timing
+        # Timing
         time_text = t_fadein + t_write + t_color + t_scale + t_author
-        time_bg = (min(len(selected), max_fast_frames) - 1) * frame_display_time if selected else 0
-        time_used = time_text + time_bg
-        # Compute remaining time and only call self.wait() if strictly positive
+        # compute approximate background playback time (if using fast frame swaps it can be large; clamp to total_duration)
+        time_bg = min(total_duration - time_text, max(0, (min(len(selected), max_fast_frames) - 1) * frame_display_time)) if selected else 0
+        time_used = time_text + max(0, time_bg)
         remaining = total_duration - time_used
         if remaining > 1e-6:
             self.wait(remaining)
         else:
             logging.info(f"No remaining time to wait (remaining={remaining}); skipping self.wait().")
+
 
 if __name__ == '__main__':
     # Optionally pre-extract before rendering (set env var AUTO_PREEXTRACT=1)
@@ -530,3 +604,6 @@ if __name__ == '__main__':
         if os.path.exists(EXPECTED_VIDEO):
             pre_extract_frames(EXPECTED_VIDEO, FRAMES_DIR, src_fps=60, tgt_fps=60, max_frames=600)
     pass
+
+# $env:BG_QUERY="birds"
+# manim -pql your_script.py AnimatedQuoteWithBackground
