@@ -351,7 +351,7 @@ def fetch_pexels_video(query="nature", per_page=15):
     If PEXELS_API_KEY is not set or any error occurs, returns None.
     """
     if not PEXELS_API_KEY:
-        logging.warning("PEXELS_API_KEY not set; cannot fetch background video from Pexels.")
+        logging.warning("PEXABLS_API_KEY not set; skipping Pexels fetch.")
         return None
     search_url = "https://api.pexels.com/videos/search"
     headers = {"Authorization": PEXELS_API_KEY}
@@ -361,55 +361,51 @@ def fetch_pexels_video(query="nature", per_page=15):
         resp.raise_for_status()
         data = resp.json()
     except Exception as e:
-        logging.error(f"Error searching Pexels videos for '{query}': {e}")
+        logging.warning(f"Pexels search failed: {e}")
         return None
 
     videos = data.get("videos", [])
     if not videos:
-        logging.warning(f"No Pexels videos found for query: {query}")
+        logging.info("Pexels search returned no videos.")
         return None
 
     # Pick a random video from results
-    choice = random.choice(videos)
-    video_files = choice.get("video_files", [])
-    if not video_files:
-        logging.warning(f"No video_files entries in chosen Pexels result for '{query}'")
-        return None
+    random.shuffle(videos)
+    for choice in videos:
+        video_files = choice.get("video_files", [])
+        if not video_files:
+            continue
 
-    # Prefer medium quality if available, else pick random
-    file_url = None
-    # Try to pick a medium resolution
-    for vf in video_files:
-        if vf.get("quality") == "sd" and vf.get("link"):
-            file_url = vf["link"]
-            break
-    if not file_url:
-        # fallback to any available link
-        candidates = [vf.get("link") for vf in video_files if vf.get("link")]
-        if candidates:
-            file_url = random.choice(candidates)
-    if not file_url:
-        logging.warning(f"No download URL found for Pexels video for '{query}'")
-        return None
+        # Prefer medium quality if available, else pick random
+        file_url = None
+        for vf in video_files:
+            if vf.get("quality") and "sd" in vf.get("quality").lower() and vf.get("link"):
+                file_url = vf["link"]
+                break
+        if not file_url:
+            candidates = [vf.get("link") for vf in video_files if vf.get("link")]
+            if candidates:
+                file_url = random.choice(candidates)
+        if not file_url:
+            continue
 
-    # Download video to a fixed local path, e.g., "pexels_bg.mp4" in BASE_DIR
-    local_filename = os.path.join(BASE_DIR, "pexels_bg.mp4")
-    try:
-        logging.info(f"Downloading Pexels video for background: {file_url}")
-        success = _download_stream_to(local_filename, file_url, headers=headers)
-        if success:
-            logging.info(f"Saved Pexels background video to: {local_filename}")
-            return local_filename
-        else:
-            return None
-    except Exception as e:
-        logging.error(f"Failed to download Pexels video {file_url}: {e}")
+        # Download video to a fixed local path, e.g., "pexels_bg.mp4" in BASE_DIR
+        local_filename = os.path.join(BASE_DIR, "pexels_bg.mp4")
         try:
-            if os.path.exists(local_filename + ".part"):
-                os.remove(local_filename + ".part")
-        except Exception:
-            pass
-        return None
+            logging.info(f"Downloading Pexels video for background: {file_url}")
+            success = _download_stream_to(local_filename, file_url, headers=headers)
+            if success:
+                logging.info(f"Saved Pexels background video to: {local_filename}")
+                return local_filename
+        except Exception as e:
+            logging.warning(f"Failed to download a Pexels candidate: {e}")
+            try:
+                if os.path.exists(local_filename + ".part"):
+                    os.remove(local_filename + ".part")
+            except Exception:
+                pass
+            continue
+    return None
 
 # --- ADDED: Pixabay fallback fetch (new) ---
 def fetch_pixabay_video(query="nature", per_page=20):
@@ -630,9 +626,13 @@ class AnimatedQuoteWithBackground(Scene):
 
         # Calculate remaining time to hit exactly total_duration
         time_used = time_fadein + time_write + time_color + time_scale + time_author
-        remaining_time = max(0, total_duration - time_used)
-        
-        self.wait(remaining_time)
+        remaining_time = total_duration - time_used
+
+        # Only call self.wait() if strictly positive to avoid Manim ValueError for zero duration
+        if remaining_time > 1e-6:
+            self.wait(remaining_time)
+        else:
+            logging.info(f"No remaining time to wait (remaining={remaining_time}); skipping self.wait().")
 
 if __name__ == '__main__':
     # Optionally pre-extract before rendering (set env var AUTO_PREEXTRACT=1)

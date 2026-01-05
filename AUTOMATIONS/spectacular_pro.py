@@ -95,10 +95,15 @@ def create_quote_mobjects(quote_text, quote_author, frame_width, frame_height):
 
 def get_audio_duration(audio_file):
     """Returns the duration (in seconds) of the given audio file."""
+    if not os.path.exists(audio_file):
+        return 0.0
     return len(AudioSegment.from_file(audio_file, format="mp3")) / 1000.0
 
 def loop_sound(audio_file, target_duration):
     """Loops and trims an audio file to match the target duration."""
+    if not os.path.exists(audio_file):
+        logging.warning(f"Audio file {audio_file} not found. Skipping background sound.")
+        return None
     audio = AudioSegment.from_file(audio_file)
     full_audio = (audio * (int(target_duration / (len(audio) / 1000)) + 1))[:int(target_duration * 1000)]
     looped_path = "looped_effect.mp3"
@@ -110,6 +115,8 @@ def trim_audio(audio_file, max_duration=30):
     Trims the given audio file to a maximum duration (in seconds).
     Returns the path to the trimmed audio file.
     """
+    if not os.path.exists(audio_file):
+        return None
     audio = AudioSegment.from_file(audio_file)
     trimmed_audio = audio[:max_duration * 1000]  # Trim to max_duration seconds
     trimmed_path = "trimmed_" + os.path.basename(audio_file)
@@ -131,7 +138,8 @@ class BaseQuoteScene(Scene):
     def apply_audio_effects(self, total_duration):
         """Loops background audio for the entire scene duration."""
         looped_effect = loop_sound(cool_effect_file, target_duration=total_duration)
-        self.add_sound(looped_effect, gain=-5)
+        if looped_effect:
+            self.add_sound(looped_effect, gain=-5)
 
     def apply_text_effects(self, quote_mobject, author_mobject, sync_duration=None):
         """
@@ -189,10 +197,10 @@ class AnimatedQuoteWithBackground(BaseQuoteScene):
         
         # 2. Immediately start the background sound effect for the full duration
         looped_effect = loop_sound(cool_effect_file, target_duration=total_duration)
-        self.add_sound(looped_effect, gain=+5)
+        if looped_effect:
+            self.add_sound(looped_effect, gain=+5)
         
         # 3. Set up background visuals immediately (avoid waiting with long animations)
-        # Instead of a long background animation, add a static background or use a very short transition.
         background = Rectangle(width=config.frame_width, height=config.frame_height)
         background.set_color_by_gradient(BLUE, PURPLE, RED)
         self.add(background)
@@ -218,53 +226,3 @@ class AnimatedQuoteWithBackground(BaseQuoteScene):
         
         # 7. Wait for the full duration of the scene so the voiceover and all animations can play completely.
         self.wait(total_duration)
-
-
-# ADVANCED SYNCHING #
-
-# class AnimatedQuoteWithBackground(BaseQuoteScene):
-#     """Scene with a cat background, continuous sound effects, and a voiceover synchronized with the quote animation."""
-    
-#     def construct(self):
-#         # 1. Apply background visual effects.
-#         self.apply_background_effects()
-        
-#         # 2. Fetch and display the cat image as background.
-#         image_path = fetch_cat_image(cat_api_key)
-#         if image_path:
-#             bg_image = ImageMobject(image_path).scale_to_fit_width(self.camera.frame_width)
-#             self.add(bg_image)
-        
-#         # 3. Fetch the quote and create text mobjects.
-#         quote_data = fetch_quote()
-#         quote_text = f"\"{quote_data['quote']}\""
-#         quote_author = f"- {quote_data['author']}"
-#         quote_mobject, author_mobject = create_quote_mobjects(
-#             quote_text, quote_author, self.camera.frame_width, self.camera.frame_height
-#         )
-#         quote_mobject.move_to(UP * 0.5)
-#         author_mobject.next_to(quote_mobject, DOWN, buff=0.5)
-        
-#         # 4. Fetch the voiceover audio for the quote.
-#         #    Do NOT trim the audio; use its full duration.
-#         audio_file = fetch_voiceover(quote_text, voice_api_key)
-#         if audio_file:
-#             voiceover_duration = get_audio_duration(audio_file)
-#             # Set the scene's total duration to the voiceover's length.
-#             total_duration = voiceover_duration
-#             # Add the voiceover audio to play in sync.
-#             self.add_sound(audio_file, gain=+20)
-#         else:
-#             # Fallback duration in case of failure.
-#             total_duration = 10
-#             voiceover_duration = total_duration
-        
-#         # 5. Loop the background effect sound for the full duration of the voiceover.
-#         self.apply_audio_effects(total_duration)
-        
-#         # 6. Animate the text, distributing the animations over the voiceover's duration.
-#         self.apply_text_effects(quote_mobject, author_mobject, sync_duration=voiceover_duration)
-        
-#         # 7. No extra waiting is necessary, as the scene's duration exactly matches the voiceover.
-#         self.wait(total_duration)
-
