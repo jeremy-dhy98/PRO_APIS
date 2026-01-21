@@ -640,3 +640,5 @@ if __name__ == '__main__':
         if os.path.exists(VIDEO_PATH):
             extract_video_frames(VIDEO_PATH, fps=30)
     pass
+
+
