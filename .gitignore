@@ -2,6 +2,7 @@
 .virtual_documents/
 .vs/
 *.mp3
+*.env
 *.mp4 
 *.wavs       
 GEMINI_AI/.ipynb_checkpoints/
@@ -21,6 +22,9 @@ GEMINI_AI/Videos/PixabayVids/__pycache__/
 Include/
         
 Lib/
+Scripts_old/
+pyvenv.cfg_old
+
 
         
 Scripts/
