@@ -4,12 +4,15 @@ import logging
 import os
 import textwrap
 import subprocess
+import re
+import wave
 from pydub import AudioSegment
 import random
 import shutil
 import tempfile
 from io import BytesIO
 from PIL import Image
+import imageio_ffmpeg
 
 # Set up logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
@@ -26,12 +29,23 @@ BG_VIDEOS_DIR = os.environ.get("BG_VIDEOS_DIR", os.path.join(BASE_DIR, "bg_video
 BG_SOUNDS_DIR = os.environ.get("BG_SOUNDS_DIR", os.path.join(BASE_DIR, "bg_sounds"))
 FRAMES_DIR = os.path.join(BASE_DIR, "video_frames")
 EXPECTED_VIDEO = os.path.join(BASE_DIR, "219305_tiny.mp4")   # Will be overwritten by downloaded file
-EXPECTED_SOUND = os.path.join(BASE_DIR, "subclip.ogg")
+EXPECTED_SOUND = os.path.abspath(os.path.join(BASE_DIR, "subclip.ogg"))
 CAT_IMAGE_FILENAME = "cat_image.jpg"
 
 os.makedirs(BG_VIDEOS_DIR, exist_ok=True)
 os.makedirs(BG_SOUNDS_DIR, exist_ok=True)
 os.makedirs(FRAMES_DIR, exist_ok=True)
+
+# Configure FFmpeg for pydub and subprocess use
+try:
+    FFMPEG_EXE = imageio_ffmpeg.get_ffmpeg_exe()
+    os.environ["IMAGEIO_FFMPEG_EXE"] = FFMPEG_EXE
+    os.environ["PATH"] = os.path.dirname(FFMPEG_EXE) + os.pathsep + os.environ.get("PATH", "")
+    AudioSegment.converter = FFMPEG_EXE
+    logging.info(f"Using FFmpeg binary: {FFMPEG_EXE}")
+except Exception as e:
+    FFMPEG_EXE = None
+    logging.warning(f"Could not configure FFmpeg via imageio-ffmpeg: {e}")
 
 # --- Topics to choose from ---
 TOPIC_CHOICES = ["nature", "birds", "art"]
@@ -40,6 +54,30 @@ TOPIC_CHOICES = ["nature", "birds", "art"]
 quote_data = None
 voiceover_file = None
 _voiceover_cached_quote = None
+
+def _write_silent_wav(duration_seconds, out_path):
+    """Create a silent WAV file using only the standard library."""
+    try:
+        duration_seconds = max(0.5, float(duration_seconds))
+    except Exception:
+        duration_seconds = 0.5
+
+    if not out_path.lower().endswith(".wav"):
+        out_path = os.path.splitext(out_path)[0] + ".wav"
+
+    sample_rate = 44100
+    n_channels = 1
+    sampwidth = 2  # 16-bit PCM
+    n_frames = int(duration_seconds * sample_rate)
+    silence = b"\x00\x00" * n_frames * n_channels
+
+    with wave.open(out_path, "wb") as wf:
+        wf.setnchannels(n_channels)
+        wf.setsampwidth(sampwidth)
+        wf.setframerate(sample_rate)
+        wf.writeframes(silence)
+
+    return out_path
 
 # ---------- New: background fetch helpers ----------
 def _download_stream_to(path, url, headers=None, timeout=30):
@@ -189,12 +227,78 @@ def fetch_background_video_for_topic(topic):
 
 # --- (other helpers unchanged — tts, audio, frames, display utilities) ---
 def _create_silent_audio(duration_seconds, out_path="voiceover.mp3"):
-    ms = int(duration_seconds * 1000)
-    silent = AudioSegment.silent(duration=ms)
-    silent.export(out_path, format="mp3")
-    return out_path
+    """
+    Create silence in a way that does not crash when FFmpeg is missing.
+    It first tries pydub export; if that fails, it writes a WAV file directly.
+    """
+    try:
+        duration_seconds = max(0.5, float(duration_seconds))
+    except Exception:
+        duration_seconds = 4.0
+
+    # If the caller asked for mp3, keep the name only if export works.
+    # Otherwise, switch to a WAV fallback.
+    try:
+        ms = int(duration_seconds * 1000)
+        silent = AudioSegment.silent(duration=ms)
+        silent.export(out_path, format=os.path.splitext(out_path)[1].lstrip(".") or "mp3")
+        return out_path
+    except Exception as e:
+        logging.warning(f"pydub silent export failed for {out_path}: {e}; falling back to WAV.")
+        fallback_path = os.path.splitext(out_path)[0] + ".wav"
+        try:
+            return _write_silent_wav(duration_seconds, fallback_path)
+        except Exception as e2:
+            logging.error(f"WAV silent fallback failed for {fallback_path}: {e2}")
+            return None
+
+def get_audio_duration(audio_file):
+    """Returns the duration (in seconds) of the given audio file."""
+    if not audio_file or not os.path.exists(audio_file):
+        logging.warning(f"get_audio_duration: file not found: {audio_file}")
+        return None
+
+    # WAV can be read without FFmpeg/ffprobe
+    if audio_file.lower().endswith(".wav"):
+        try:
+            with wave.open(audio_file, "rb") as wf:
+                frames = wf.getnframes()
+                rate = wf.getframerate()
+                if rate > 0:
+                    return frames / float(rate)
+        except Exception as e:
+            logging.warning(f"Could not read WAV duration for {audio_file}: {e}")
+
+    # Try FFmpeg probe (works without ffprobe)
+    if FFMPEG_EXE and os.path.exists(audio_file):
+        try:
+            probe = subprocess.run(
+                [FFMPEG_EXE, "-i", audio_file],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            text = probe.stderr or ""
+            m = re.search(r"Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)", text)
+            if m:
+                h = int(m.group(1))
+                mi = int(m.group(2))
+                s = float(m.group(3))
+                return h * 3600 + mi * 60 + s
+        except Exception as e:
+            logging.warning(f"Could not probe audio duration for {audio_file}: {e}")
+
+    # Last fallback: pydub
+    try:
+        audio = AudioSegment.from_file(audio_file)
+        return len(audio) / 1000.0
+    except Exception as e:
+        logging.warning(f"Could not get audio duration for {audio_file}: {e}")
+        return None
 
 def fetch_voiceover(quote, api_key, fallback_silent_duration=4):
+    """Fetches voiceover for the given quote using VoiceRSS API (always fetch new)."""
     global voiceover_file, _voiceover_cached_quote
     if _voiceover_cached_quote == quote and voiceover_file and os.path.exists(voiceover_file):
         return voiceover_file
@@ -208,6 +312,12 @@ def fetch_voiceover(quote, api_key, fallback_silent_duration=4):
             os.remove("voiceover.mp3")
         except Exception:
             pass
+    if os.path.exists("voiceover.wav"):
+        try:
+            os.remove("voiceover.wav")
+        except Exception:
+            pass
+
     voiceover_file = None
     _voiceover_cached_quote = None
     if not api_key:
@@ -228,24 +338,33 @@ def fetch_voiceover(quote, api_key, fallback_silent_duration=4):
         "v": "John"
     }
     try:
-        resp = requests.get(url, params=params, timeout=15)
-        resp.raise_for_status()
-        ct = resp.headers.get("Content-Type", "")
-        if "audio" not in ct.lower() and not resp.content.startswith(b"ID3"):
+        response = requests.get(url, params=params, timeout=15)
+        response.raise_for_status()
+        ct = response.headers.get("Content-Type", "")
+        if "audio" not in ct.lower() and not response.content.startswith(b"ID3"):
             logging.error("TTS returned non-audio content; falling back to silent audio")
-            return _create_silent_audio(fallback_silent_duration, out_path="voiceover.mp3")
-        if len(resp.content) < 1000:
+            out = _create_silent_audio(fallback_silent_duration, out_path="voiceover.mp3")
+            voiceover_file = out
+            _voiceover_cached_quote = quote
+            return voiceover_file
+        if len(response.content) < 1000:
             logging.warning("TTS returned suspiciously small payload; using silent fallback")
-            return _create_silent_audio(fallback_silent_duration, out_path="voiceover.mp3")
+            out = _create_silent_audio(fallback_silent_duration, out_path="voiceover.mp3")
+            voiceover_file = out
+            _voiceover_cached_quote = quote
+            return voiceover_file
         with open("voiceover.mp3", "wb") as f:
-            f.write(resp.content)
+            f.write(response.content)
         voiceover_file = "voiceover.mp3"
         _voiceover_cached_quote = quote
         logging.info("Downloaded voiceover.mp3")
         return voiceover_file
     except Exception as e:
         logging.error(f"Error fetching voiceover: {e}; using silent fallback")
-        return _create_silent_audio(fallback_silent_duration, out_path="voiceover.mp3")
+        out = _create_silent_audio(fallback_silent_duration, out_path="voiceover.mp3")
+        voiceover_file = out
+        _voiceover_cached_quote = quote
+        return voiceover_file
 
 def trim_audio(audio_file, max_duration=30):
     if not audio_file or not os.path.exists(audio_file):
@@ -292,11 +411,14 @@ def pre_extract_frames(video_src, output_dir, src_fps=60, tgt_fps=60, max_frames
     if not video_src or not os.path.exists(video_src):
         logging.warning(f"pre_extract_frames: video not found: {video_src}")
         return False
+    if not FFMPEG_EXE:
+        logging.warning("FFmpeg executable not configured; cannot pre-extract frames.")
+        return False
     if os.path.exists(output_dir):
         shutil.rmtree(output_dir)
     os.makedirs(output_dir, exist_ok=True)
     pattern = os.path.join(output_dir, "frame%05d.png")
-    cmd = ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error", "-i", video_src]
+    cmd = [FFMPEG_EXE, "-y", "-hide_banner", "-loglevel", "error", "-i", video_src]
     if max_frames:
         cmd += ["-vf", f"fps={tgt_fps}", "-frames:v", str(max_frames), pattern]
     else:
@@ -315,12 +437,15 @@ def extract_video_frames(video_file, fps=60):
     if not video_file or not os.path.exists(video_file):
         logging.warning(f"extract_video_frames: missing video: {video_file}")
         return []
+    if not FFMPEG_EXE:
+        logging.warning("FFmpeg executable not configured; cannot extract frames.")
+        return []
     existing = sorted([os.path.join(FRAMES_DIR, f) for f in os.listdir(FRAMES_DIR) if f.endswith('.png')])
     if existing:
         logging.info(f"Using pre-extracted {len(existing)} frames from {FRAMES_DIR}")
         return existing
     pattern = os.path.join(FRAMES_DIR, "frame%05d.png")
-    cmd = ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error", "-i", video_file, "-vf", f"fps={fps}", pattern]
+    cmd = [FFMPEG_EXE, "-y", "-hide_banner", "-loglevel", "error", "-i", video_file, "-vf", f"fps={fps}", pattern]
     try:
         subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
     except Exception as e:
@@ -444,570 +569,183 @@ def create_quote_mobjects(quote_text, quote_author, frame_width, frame_height):
     a.set_color(YELLOW)
     return q, a
 
-# ---------------------
-# Randomized text animation styles (NEW)
-# ---------------------
-def _glowify(mobj, layers=3, scale_step=1.04, opacity_step=0.12):
-    """
-    Create a subtle glow by stacking slightly larger, low-opacity copies behind.
-    Returns a VGroup (glow layers + original).
-    """
-    layers_list = []
-    for i in range(layers, 0, -1):
-        try:
-            copy = mobj.copy()
-            copy.set_opacity(opacity_step * i)
-            copy.scale(scale_step * (1 + (i * 0.01)))
-            layers_list.append(copy)
-        except Exception:
-            # if copy fails, skip gracefully
-            continue
-    try:
-        layers_list.append(mobj)
-        return VGroup(*layers_list)
-    except Exception:
-        return mobj
-
-def style_handwriting(scene, q_mobj, a_mobj, total_duration, raw_text=None):
-    # Classic handwriting: Manim's Write for a natural reveal
-    scene.add(q_mobj)
-    run = min(total_duration * 0.6, 4.0)
-    try:
-        scene.play(Write(q_mobj), run_time=run)
-    except Exception:
-        # fallback: fadeIn
-        scene.play(FadeIn(q_mobj), run_time=min(1.2, run))
-    scene.play(FadeIn(a_mobj), run_time=0.8)
-
-def style_wordbyword(scene, q_mobj, a_mobj, sync_duration=None, raw_text=None, **kwargs):
-    """
-    Word-by-word reveal with wrapping (robust signature: sync_duration).
-    - Wrap words into multiple lines constrained by max_width (based on q_mobj or camera).
-    - Animate words left->right, top->bottom with LaggedStart.
-    - Scale very long single words to fit.
-    """
-    # Use sync_duration (may be None)
-    total_duration = sync_duration or 5.0
-
-    # Get raw text to split words (prefer raw_text if available)
-    text_source = None
-    if raw_text:
-        text_source = raw_text.strip().replace("\n", " ")
-    else:
-        try:
-            if hasattr(q_mobj, "get_text"):
-                text_source = q_mobj.get_text()
-            elif hasattr(q_mobj, "text"):
-                text_source = q_mobj.text
-        except Exception:
-            text_source = None
-
-    if not text_source:
-        # fallback: show the paragraph as-is
-        scene.add(q_mobj)
-        scene.play(FadeIn(q_mobj), run_time=min(1.0, total_duration * 0.2))
-        scene.play(FadeIn(a_mobj), run_time=0.7)
-        return
-
-    # Prepare words
-    words = [w for w in text_source.split(" ") if w.strip()]
-    if not words:
-        scene.add(q_mobj)
-        scene.play(FadeIn(q_mobj), run_time=min(1.0, total_duration * 0.2))
-        scene.play(FadeIn(a_mobj), run_time=0.7)
-        return
-
-    # Determine layout constraints
-    try:
-        preferred_width = getattr(q_mobj, "width", 0) or 0
-        max_width = min(preferred_width if preferred_width > 0 else scene.camera.frame_width * 0.8,
-                        scene.camera.frame_width * 0.9)
-    except Exception:
-        max_width = scene.camera.frame_width * 0.9
-
-    # Base font size (try to reuse q_mobj font size)
-    base_font = 40
-    try:
-        base_font = getattr(q_mobj, "font_size", base_font) or base_font
-    except Exception:
-        pass
-
-    # Create Text mobjects for each word, scaling any that are too wide
-    word_mobs = []
-    for w in words:
-        try:
-            wm = Text(w, font_size=base_font)
-        except Exception:
-            wm = Text(w)
-        try:
-            if wm.width > max_width:
-                scale_factor = (max_width / wm.width) * 0.95
-                wm.scale(scale_factor)
-        except Exception:
-            pass
-        word_mobs.append(wm)
-
-    # Pack words into lines so each line.width <= max_width
-    lines = []
-    current_line = VGroup()
-    spacing = 0.12
-    for wm in word_mobs:
-        if len(current_line) == 0:
-            current_line.add(wm)
-            try:
-                current_line.arrange(RIGHT, buff=spacing)
-            except Exception:
-                pass
-            continue
-
-        # Tentatively add and measure
-        current_line.add(wm)
-        try:
-            current_line.arrange(RIGHT, buff=spacing)
-            if current_line.width > max_width:
-                # overflow: remove wm from current_line and start a new line
-                current_line.remove(wm)
-                lines.append(current_line)
-                current_line = VGroup()
-                current_line.add(wm)
-                try:
-                    current_line.arrange(RIGHT, buff=spacing)
-                except Exception:
-                    pass
-            else:
-                # still fits
-                pass
-        except Exception:
-            # On measurement error, keep current_line as-is
-            pass
-
-    if len(current_line) > 0:
-        lines.append(current_line)
-
-    if not lines:
-        # fallback: display paragraph
-        scene.add(q_mobj)
-        scene.play(FadeIn(q_mobj), run_time=min(1.0, total_duration * 0.2))
-        scene.play(FadeIn(a_mobj), run_time=0.7)
-        return
-
-    # Arrange lines and position where the original paragraph was
-    for ln in lines:
-        try:
-            ln.arrange(RIGHT, buff=spacing)
-        except Exception:
-            pass
-
-    lines_group = VGroup(*lines)
-    try:
-        lines_group.arrange(DOWN, buff=0.15)
-        try:
-            target_center = q_mobj.get_center()
-        except Exception:
-            target_center = ORIGIN
-        lines_group.move_to(target_center)
-    except Exception:
-        lines_group.center()
-
-    # Add to scene (avoid adding original paragraph to prevent duplicates)
-    scene.add(lines_group)
-
-    # Flatten words into reading order (left->right top->bottom)
-    ordered_words = []
-    for ln in lines:
-        for sub in ln:
-            ordered_words.append(sub)
-
-    # Animation timing
-    run_words = max(1.0, min(total_duration * 0.55, 6.0))
-    lag_ratio = 0.12 if len(ordered_words) < 12 else 0.06
-
-    # Animate with staggered FadeIn, fallback to single fade
-    try:
-        scene.play(
-            LaggedStart(*[FadeIn(w, shift=UP, scale=0.95) for w in ordered_words], lag_ratio=lag_ratio),
-            run_time=run_words,
-        )
-    except Exception:
-        scene.play(FadeIn(lines_group), run_time=min(1.2, run_words))
-
-    # Reveal author
-    try:
-        scene.play(FadeIn(a_mobj, shift=UP), run_time=0.7)
-    except Exception:
-        scene.add(a_mobj)
-
-def style_mask_reveal(scene, quote_mobject, author_mobject, sync_duration=None, raw_text=None):
-    """
-    Rotating shard reveal:
-    Several vertical 'shards' cover the quote, then rotate & slide outward
-    in a staggered (lagged) sequence revealing the quote underneath.
-    Uses sync_duration to scale animation timing when available.
-    """
-    # Ensure quote is present under the shards
-    try:
-        scene.add(quote_mobject)
-    except Exception:
-        pass
-
-    try:
-        # Compute bounding box for the quote
-        left_pt = quote_mobject.get_left()
-        right_pt = quote_mobject.get_right()
-        top_pt = quote_mobject.get_top()
-        bottom_pt = quote_mobject.get_bottom()
-        center_pt = quote_mobject.get_center()
-
-        left_x = float(left_pt[0])
-        right_x = float(right_pt[0])
-        center_y = float(center_pt[1])
-        width = max(0.01, right_x - left_x)
-        height = max(0.5, float(top_pt[1] - bottom_pt[1]))
-    except Exception:
-        # fallback to camera-sized box
-        center_pt = quote_mobject.get_center() if hasattr(quote_mobject, "get_center") else ORIGIN
-        center_y = float(center_pt[1]) if hasattr(center_pt, "__len__") else 0.0
-        width = scene.camera.frame_width * 0.7
-        height = scene.camera.frame_height * 0.35
-        left_x = -width / 2 + float(center_pt[0]) if hasattr(center_pt, "__len__") else -width / 2
-
-    # Shard configuration
-    n_shards = 8
-    try:
-        # scale shards by quote width so short quotes still look good
-        n_shards = max(4, min(12, int(width // (scene.camera.frame_width * 0.06)) or 8))
-    except Exception:
-        n_shards = 8
-
-    shard_w = width / n_shards * 1.02
-    shards = []
-
-    for i in range(n_shards):
-        try:
-            shard = Rectangle(width=shard_w, height=height * 1.15)
-            shard.set_fill(BLACK, opacity=0.95)
-            shard.set_stroke(width=0)
-            # place shards across the quote bounding box
-            x = left_x + shard_w * (i + 0.5)
-            shard.move_to(RIGHT * x + UP * center_y)
-            # ensure shards are visually on top
-            try:
-                shard.set_z_index(1000)
-            except Exception:
-                pass
-            scene.add(shard)
-            shards.append(shard)
-        except Exception:
-            continue
-
-    # Decide timing
-    total_shard_time = min(sync_duration * 0.35, 1.2) if sync_duration else 0.9
-    lag_ratio = 0.08
-
-    # Prepare animations for each shard: rotate + slide outward with some variance
-    anims = []
-    for idx, shard in enumerate(shards):
-        try:
-            # sign: left shards go left, right shards go right
-            side = -1 if idx < (len(shards) / 2) else 1
-            # randomize rotation and vertical drift
-            angle_deg = side * (random.uniform(18, 55))
-            angle = angle_deg * DEGREES
-            horiz_shift = side * scene.camera.frame_width * random.uniform(0.8, 1.3)
-            vert_shift = scene.camera.frame_height * random.uniform(-0.25, 0.25)
-            shift_vec = RIGHT * horiz_shift + UP * vert_shift
-            # create the animation (rotate then shift together)
-            anim = shard.animate.rotate(angle).shift(shift_vec)
-            anims.append(anim)
-        except Exception:
-            # fallback: simple fade out if transform cannot be created
-            anims.append(FadeOut(shard))
-
-    # Play the staggered shard animations
-    try:
-        # Use LaggedStart to create the staggered shard effect
-        scene.play(LaggedStart(*anims, lag_ratio=lag_ratio), run_time=max(0.6, total_shard_time))
-    except Exception:
-        # fallback: quickly fade the shards away
-        try:
-            scene.play(LaggedStart(*[FadeOut(s) for s in shards], lag_ratio=lag_ratio), run_time=0.8)
-        except Exception:
-            pass
-
-    # Remove shards (clean up)
-    for s in shards:
-        try:
-            scene.remove(s)
-        except Exception:
-            pass
-
-    # Finally, reveal the author
-    try:
-        scene.play(FadeIn(author_mobject), run_time=0.7)
-    except Exception:
-        try:
-            scene.add(author_mobject)
-        except Exception:
-            pass
-
-def style_kinetic(scene, q_mobj, a_mobj, total_duration, raw_text=None):
-    # Scale + color pulse + small rotate emphasis
-    scene.add(q_mobj)
-    run = min(total_duration * 0.45, 3.0)
-    try:
-        scene.play(Write(q_mobj), run_time=run)
-    except Exception:
-        scene.play(FadeIn(q_mobj), run_time=min(1.0, run))
-    # a quick emphasis pulse
-    try:
-        scene.play(q_mobj.animate.scale(1.06).set_color_by_gradient(BLUE, PURPLE), run_time=0.45)
-        scene.play(q_mobj.animate.scale(1/1.06).set_color_by_gradient(WHITE, YELLOW), run_time=0.35)
-    except Exception:
-        pass
-    scene.play(FadeIn(a_mobj), run_time=0.6)
-
-def style_pop_and_bounce(scene, q_mobj, a_mobj, total_duration, raw_text=None):
-    # Pop-in and subtle bounce
-    q_copy = q_mobj.copy()
-    q_copy.scale(0.85)
-    scene.add(q_copy)
-    try:
-        scene.play(FadeIn(q_copy), run_time=0.4)
-        scene.play(q_copy.animate.scale(1.12).set_color_by_gradient(YELLOW, ORANGE), run_time=0.5)
-        scene.play(q_copy.animate.scale(1/1.12), run_time=0.35)
-    except Exception:
-        scene.play(FadeIn(q_copy), run_time=0.9)
-    scene.play(FadeIn(a_mobj), run_time=0.6)
-    try:
-        # replace original with the copy to keep scene consistent
-        scene.remove(q_mobj)
-        scene.add(q_copy)
-    except Exception:
-        pass
-
-def style_neon_glow(scene, q_mobj, a_mobj, total_duration, raw_text=None):
-    # Create glow by stacking copies (non-destructive)
-    glow = _glowify(q_mobj, layers=3)
-    try:
-        glow.move_to(q_mobj.get_center())
-        scene.add(glow)
-        scene.play(FadeIn(glow, shift=DOWN), run_time=min(total_duration * 0.6, 3.5))
-    except Exception:
-        scene.add(q_mobj)
-        scene.play(FadeIn(q_mobj), run_time=min(1.2, total_duration * 0.4))
-    scene.play(FadeIn(a_mobj), run_time=0.6)
-
-_ANIM_STYLES = [
-    style_handwriting,
-    style_wordbyword,
-    style_mask_reveal,
-    style_kinetic,
-    style_pop_and_bounce,
-    style_neon_glow,
-]
-
-def play_random_text_style(scene, q_mobj, a_mobj, total_duration, raw_text=None):
-    """
-    Choose a random polished style and play it.
-    Optionally supply raw_text (string) to help word-by-word style.
-    """
-    style = random.choice(_ANIM_STYLES)
-    logging.info(f"Selected text animation style: {style.__name__}")
-    try:
-        style(scene, q_mobj, a_mobj, total_duration, raw_text=raw_text)
-    except Exception as e:
-        logging.warning(f"Selected style {style.__name__} failed: {e}. Falling back to simple fade.")
-        scene.add(q_mobj)
-        scene.play(FadeIn(q_mobj), run_time=min(1.2, total_duration * 0.2))
-        scene.play(FadeIn(a_mobj), run_time=0.7)
-
-    # Small accent occasionally
-    if random.random() < 0.35:
-        try:
-            underline = Line(q_mobj.get_left() + DOWN * 0.22, q_mobj.get_right() + DOWN * 0.22, stroke_width=3)
-            underline.set_opacity(0.0)
-            scene.add(underline)
-            scene.play(underline.animate.set_opacity(1.0), run_time=0.5)
-            scene.play(FadeOut(underline), run_time=0.4)
-        except Exception:
-            pass
-
-# === Scene using the fast background display (now picks a random topic and fetches fresh media each run) ===
 class AnimatedQuoteWithBackground(Scene):
     def construct(self):
-        # We'll set total_duration from the voiceover length below.
-        # Default fallback:
-        total_duration = 7.0
+        # Set total duration of the scene (in seconds) — default, may be adjusted below
+        total_duration = 7
 
-        # Step 0: choose topic at random (or use BG_QUERY env var to override)
-        env_topic = os.environ.get("BG_QUERY")
-        if env_topic:
-            topic = env_topic
-            logging.info(f"BG_QUERY provided via env: '{topic}'")
-        else:
-            topic = random.choice(TOPIC_CHOICES)
-            logging.info(f"No BG_QUERY set — randomly selected topic: '{topic}'")
+        # ---- NEW: clear prior downloaded background and frames to force fresh fetch every run ----
+        # Clear only the designated media directories so we do not remove notebooks/scripts.
+        def _remove_path_safe(path):
+            try:
+                if os.path.islink(path) or os.path.isfile(path):
+                    os.remove(path)
+                elif os.path.isdir(path):
+                    shutil.rmtree(path)
+            except Exception:
+                logging.debug(f"Failed to remove {path}; ignoring.")
 
-        # Fetch quote & TTS first so we can set scene duration from voice length
-        qinfo = fetch_quote()
-        raw = qinfo.get('quote', 'No quote found')
+        def _clear_media_dir(dirpath, preserve_names=()):
+            """
+            Remove all files/folders inside dirpath except names listed in preserve_names.
+            Does NOT touch dirpath itself or anything outside it.
+            """
+            if not os.path.isdir(dirpath):
+                return
+            for name in os.listdir(dirpath):
+                if name in preserve_names:
+                    logging.info(f"Preserving {os.path.join(dirpath, name)}")
+                    continue
+                _remove_path_safe(os.path.join(dirpath, name))
+
+        logging.info("Clearing previous background files & frames (inside designated media dirs only).")
+        # Preserve subclip.ogg filename if present in BG_SOUNDS_DIR
+        preserve_name = os.path.basename(EXPECTED_SOUND)
+        _clear_media_dir(BG_VIDEOS_DIR, preserve_names=())
+        _clear_media_dir(BG_SOUNDS_DIR, preserve_names=(preserve_name,))
+        # Clear frames directory fully (we will re-extract frames)
+        _clear_media_dir(FRAMES_DIR, preserve_names=())
+
+        # Also remove known temporary downloaded background files in BASE_DIR (explicit whitelist)
+        for tmp_name in ("pexels_bg.mp4", "pixabay_bg.mp4"):
+            tmp_path = os.path.join(BASE_DIR, tmp_name)
+            if os.path.exists(tmp_path):
+                _remove_path_safe(tmp_path)
+
+        # === Fetch Background Video topic selection happens later; first fetch quote + voiceover ===
+
+        # === Quote and Voiceover Logic ===
+        quote_info = fetch_quote()
+        raw = quote_info.get('quote', 'No quote found')
         display_q = f'"{raw}"'
-        author = qinfo.get('author', 'Unknown')
+        author = quote_info.get('author', 'Unknown')
 
-        # Fetch voiceover (this will write voiceover.mp3 or fallback silent file)
+        # Fetch voiceover (always fetch new)
         audio = fetch_voiceover(raw, voice_api_key)
+
+        # If we got an audio file, measure its duration and set total_duration accordingly (with small padding)
         measured_voice_dur = None
         if audio and os.path.exists(audio):
             try:
-                measured_voice_dur = AudioSegment.from_file(audio).duration_seconds
-                logging.info(f"Measured voiceover duration: {measured_voice_dur:.2f}s")
+                measured_voice_dur = get_audio_duration(audio)
+                if measured_voice_dur is not None:
+                    logging.info(f"Measured voiceover duration: {measured_voice_dur:.2f}s")
             except Exception as e:
                 logging.warning(f"Could not measure voiceover duration: {e}")
                 measured_voice_dur = None
 
-        # Determine total_duration from voiceover length (with small padding) if available
         if measured_voice_dur and measured_voice_dur > 0:
-            # add small padding to avoid premature cut
             total_duration = float(measured_voice_dur) + 0.25
-            # cap to something reasonable
+            # cap to a reasonable maximum to avoid extremely long videos
             if total_duration > 120:
                 total_duration = 120.0
-            logging.info(f"Setting scene total_duration to voice length + padding: {total_duration:.2f}s")
+            logging.info(f"Scene total_duration set from voiceover: {total_duration:.2f}s")
         else:
-            logging.info(f"Using fallback total_duration: {total_duration:.2f}s")
+            logging.info(f"Using fallback/default total_duration: {total_duration:.2f}s")
 
-        # ---- CLEAR EXISTING MEDIA (but never delete a file named 'subclip.ogg') ----
-        # Clear BG_VIDEOS_DIR and BG_SOUNDS_DIR so fresh downloads happen each run.
-        def _clear_dir_but_keep_subclip(dirpath):
+        # Now that total_duration is known, prepare/loop background sound trimmed to total_duration (if available)
+        if os.path.isfile(EXPECTED_SOUND):
             try:
-                for name in os.listdir(dirpath):
-                    full = os.path.join(dirpath, name)
-                    # skip if this file is named 'subclip.ogg'
-                    if os.path.basename(full) == os.path.basename(EXPECTED_SOUND):
-                        logging.info(f"Skipping removal of {full} (subclip.ogg protected).")
-                        continue
-                    try:
-                        if os.path.isfile(full) or os.path.islink(full):
-                            os.remove(full)
-                        elif os.path.isdir(full):
-                            shutil.rmtree(full)
-                    except Exception:
-                        pass
-            except FileNotFoundError:
-                pass
-
-        logging.info("Clearing background media directories (preserving any 'subclip.ogg').")
-        _clear_dir_but_keep_subclip(BG_VIDEOS_DIR)
-        _clear_dir_but_keep_subclip(BG_SOUNDS_DIR)
-
-        # Clear frames directory (safe to remove everything)
-        try:
-            if os.path.exists(FRAMES_DIR):
-                shutil.rmtree(FRAMES_DIR)
-        except Exception:
-            pass
-        os.makedirs(FRAMES_DIR, exist_ok=True)
-
-        # Always attempt to fetch a fresh video for the chosen topic (overwrites EXPECTED_VIDEO)
-        fetched = fetch_background_video_for_topic(topic)
-        if fetched:
-            logging.info(f"Using freshly downloaded background: {fetched}")
+                looped_effect = loop_sound(EXPECTED_SOUND, total_duration)
+                if looped_effect and os.path.exists(looped_effect):
+                    self.add_sound(looped_effect, gain=-5)
+                else:
+                    logging.info("Background sound could not be prepared; skipping background loop sound.")
+            except Exception as e:
+                logging.warning(f"Background sound loading failed: {e}")
         else:
-            if os.path.exists(EXPECTED_VIDEO):
-                logging.info(f"No remote video fetched — falling back to local EXPECTED_VIDEO: {EXPECTED_VIDEO}")
-            else:
-                logging.warning("No background video available. Scene will attempt to proceed without video frames.")
+            logging.info(f"Background sound file not found at {EXPECTED_SOUND}.")
 
-        # Prepare/loop background sound (unchanged) - use total_duration now
-        if os.path.exists(EXPECTED_SOUND):
-            looped = loop_sound(EXPECTED_SOUND, total_duration)
-            if looped and os.path.exists(looped):
-                self.add_sound(looped, gain=-5)
+        # === Fetch Background Video ===
+        # Choose a topic at random from ['nature','birds','art'] unless overridden by env var
+        env_topic = os.environ.get("BG_QUERY", None)
+        if env_topic:
+            chosen_topic = env_topic
+            logging.info(f"BG_QUERY provided via env: '{chosen_topic}'")
         else:
-            logging.info("No EXPECTED_SOUND found; skipping background loop sound.")
+            chosen_topic = random.choice(["nature", "birds", "art"])
+            logging.info(f"No BG_QUERY set — randomly selected topic: '{chosen_topic}'")
 
-        # Pre-extract dense frames if missing
-        if not any(f.endswith('.png') for f in os.listdir(FRAMES_DIR)):
-            if os.path.exists(EXPECTED_VIDEO):
-                pre_extract_frames(EXPECTED_VIDEO, FRAMES_DIR, src_fps=60, tgt_fps=60, max_frames=600)
-            else:
-                logging.warning("No EXPECTED_VIDEO to pre-extract from.")
+        # Try to fetch a fresh video for chosen topic (Pexels -> Pixabay). If not found,
+        # fall back to the local VIDEO_PATH that was the original behavior.
+        fetched_video = fetch_background_video_for_topic(chosen_topic)
+        video_background_file = fetched_video if (fetched_video and os.path.exists(fetched_video)) else EXPECTED_VIDEO
 
-        frames = extract_video_frames(EXPECTED_VIDEO, fps=60)
-
-        # Display fast background (pool updater default)
-        use_pool = True
-        frame_display_time = 0.02
-        max_fast_frames = 300
-        selected = frames[:max_fast_frames]
-
-        bg_container = None
-        if selected:
-            if use_pool:
-                bg_container = add_fast_pool_updater(self, selected, fast_frame_time=frame_display_time, pool_size=150)
-            else:
-                bg_container = display_fast_frame_sequence(self, selected, frame_display_time=frame_display_time, max_frames=max_fast_frames)
+        # === BREAK MEDIA INTO CONSTITUENT IMAGES (RAPID DISPLAY) ===
+        # Extract at high FPS (30) to get a dense pool of frames
+        video_frames = extract_video_frames(video_background_file, fps=30)
+        
+        if not video_frames:
+            logging.error("No background frames available. Scene will have no background.")
+            bg_pool = []
         else:
-            logging.warning("No frames available for fast background")
+            # Preload a pool of ImageMobjects for the rapid-flicker effect
+            # We scale them to fit the frame dimensions
+            bg_pool = [
+                ImageMobject(img).scale_to_fit_width(config.frame_width) 
+                for img in video_frames[:150]  # Limit pool to manage memory
+            ]
 
-        # Prepare text mobjects
+        # --- UPDATED FIX: Use set_z_index and self.add() to ensure background stays behind text ---
+        if bg_pool:
+            bg_container = bg_pool[0].copy()
+            bg_container.set_z_index(-10)  # Force background to the bottom layer
+            self.add(bg_container)
+
+            # Define the "Very Fast Display" functionality via an Updater
+            # This changes the image 15 times per second (strobe effect)
+            def rapid_image_swap(mob, dt):
+                swap_speed = 15  # Images per second
+                index = int((self.time * swap_speed) % len(bg_pool))
+                mob.become(bg_pool[index])
+
+            bg_container.add_updater(rapid_image_swap)
+
+        # Quote + voiceover mobjects
         q_mobj, a_mobj = create_quote_mobjects(display_q, author, self.camera.frame_width, self.camera.frame_height)
         q_mobj.move_to(UP * 0.5)
         a_mobj.next_to(q_mobj, DOWN, buff=0.4)
 
-        # Add the voiceover (trim if needed to exact scene duration)
+        # Add voiceover: if it exists, trim if longer than the scene; else add as-is
         if audio and os.path.exists(audio):
-            # If voiceover is longer than total_duration (unlikely since we based total on voice length),
-            # trim to total_duration; otherwise keep it.
             try:
-                voice_dur = AudioSegment.from_file(audio).duration_seconds
+                voice_len = get_audio_duration(audio)
             except Exception:
-                voice_dur = None
-            if voice_dur and voice_dur > total_duration + 0.001:
+                voice_len = None
+            if voice_len and voice_len > total_duration + 0.001:
                 trimmed = trim_audio(audio, max_duration=total_duration)
                 if trimmed and os.path.exists(trimmed):
                     self.add_sound(trimmed, gain=+10)
             else:
                 self.add_sound(audio, gain=+10)
 
-        # Animate text
-        t_fadein = 0.8
-        t_write = 2
-        t_color = 1
-        t_scale = 0.8
-        t_author = 0.8
+        # === TEXT ANIMATION (Concurrently with Background Strobe) ===
+        # Ensure text has a higher z_index (default is 0) so it stays on top
+        time_fadein = 0.8
+        time_write = 2
+        time_color = 1
+        time_scale = 0.8
+        time_author = 0.8
 
-        # REPLACED: static sequence -> randomized polished style chooser
-        # old:
-        # self.play(FadeIn(q_mobj, shift=UP, scale=1.2), run_time=t_fadein)
-        # self.play(Write(q_mobj), run_time=t_write)
-        # self.play(q_mobj.animate.set_color_by_gradient(BLUE, PURPLE), run_time=t_color)
-        # self.play(q_mobj.animate.scale(1.1), run_time=t_scale)
-        # self.play(FadeIn(a_mobj, shift=UP), run_time=t_author)
-        #
-        # new: pick a random style and play it (we pass raw for better word-by-word timing)
-        play_random_text_style(self, q_mobj, a_mobj, total_duration, raw_text=raw)
+        self.play(FadeIn(q_mobj, shift=UP, scale=1.2), run_time=time_fadein)
+        self.play(Write(q_mobj), run_time=time_write)
+        self.play(q_mobj.animate.set_color_by_gradient(BLUE, PURPLE), run_time=time_color)
+        self.play(q_mobj.animate.scale(1.1), run_time=time_scale)
+        self.play(FadeIn(a_mobj, shift=UP), run_time=time_author)
 
-        # Timing
-        # estimate text animation consumption as up to 60% of total_duration but not more than explicit sums
-        time_text = min(total_duration * 0.6, (t_fadein + t_write + t_color + t_scale + t_author))
-        # compute approximate background playback time (if using fast frame swaps it can be large; clamp to total_duration)
-        time_bg = min(total_duration - time_text, max(0, (min(len(selected), max_fast_frames) - 1) * frame_display_time)) if selected else 0
-        time_used = time_text + max(0, time_bg)
-        remaining = total_duration - time_used
-        if remaining > 1e-6:
-            self.wait(remaining)
+        # Calculate remaining time to hit exactly total_duration
+        time_used = time_fadein + time_write + time_color + time_scale + time_author
+        remaining_time = total_duration - time_used
+
+        # Only call self.wait() if strictly positive to avoid Manim ValueError for zero duration
+        if remaining_time > 1e-6:
+            self.wait(remaining_time)
         else:
-            logging.info(f"No remaining time to wait (remaining={remaining}); skipping self.wait().")
-
+            logging.info(f"No remaining time to wait (remaining={remaining_time}); skipping self.wait().")
 
 if __name__ == '__main__':
     # Optionally pre-extract before rendering (set env var AUTO_PREEXTRACT=1)
     if os.environ.get("AUTO_PREEXTRACT", "0") in ("1", "true", "yes"):
         if os.path.exists(EXPECTED_VIDEO):
-            pre_extract_frames(EXPECTED_VIDEO, FRAMES_DIR, src_fps=60, tgt_fps=60, max_frames=600)
+            pre_extract_frames(EXPECTED_VIDEO, FRAMES_DIR, src_fps=30, tgt_fps=30, max_frames=600)
     pass
-
-# $env:BG_QUERY="birds"
-# manim -pql your_script.py AnimatedQuoteWithBackground
-

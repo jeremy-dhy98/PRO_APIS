@@ -12,6 +12,7 @@ import json
 import random  # for random choice in Pexels results
 import tempfile  # for temporary download if desired
 import shutil
+import imageio_ffmpeg
 
 # Set up logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
@@ -53,6 +54,33 @@ os.makedirs(BG_VIDEOS_DIR, exist_ok=True)
 os.makedirs(BG_SOUNDS_DIR, exist_ok=True)
 os.makedirs(FRAMES_DIR, exist_ok=True)
 
+# Configure FFmpeg for pydub and subprocess use
+try:
+    FFMPEG_EXE = imageio_ffmpeg.get_ffmpeg_exe()
+    os.environ["IMAGEIO_FFMPEG_EXE"] = FFMPEG_EXE
+    os.environ["PATH"] = os.path.dirname(FFMPEG_EXE) + os.pathsep + os.environ.get("PATH", "")
+    AudioSegment.converter = FFMPEG_EXE
+    try:
+        AudioSegment.ffprobe = FFMPEG_EXE
+    except Exception:
+        pass
+    logging.info(f"Using FFmpeg binary: {FFMPEG_EXE}")
+except Exception as e:
+    FFMPEG_EXE = None
+    logging.warning(f"Could not configure FFmpeg via imageio-ffmpeg: {e}")
+
+def _create_silent_audio(duration_seconds, out_path):
+    """Create a silent mp3 file for fallback use."""
+    try:
+        duration_seconds = float(duration_seconds)
+    except Exception:
+        duration_seconds = 4.0
+    duration_seconds = max(0.5, duration_seconds)
+    ms = int(duration_seconds * 1000)
+    silent = AudioSegment.silent(duration=ms)
+    silent.export(out_path, format="mp3")
+    return out_path
+
 def load_frames_metadata():
     """Load metadata dict from METADATA_PATH if exists; else return None."""
     # CACHING DISABLED: always return None
@@ -78,6 +106,10 @@ def extract_video_frames(video_file, fps=30):
     output_dir = FRAMES_DIR
     os.makedirs(output_dir, exist_ok=True)
 
+    if not FFMPEG_EXE:
+        logging.warning("FFmpeg executable not configured; cannot extract frames.")
+        return []
+
     # Determine video modification time
     try:
         video_mtime = os.path.getmtime(video_file)
@@ -101,12 +133,13 @@ def extract_video_frames(video_file, fps=30):
                 pass
     # Run ffmpeg to extract frames
     frame_pattern = os.path.join(output_dir, "frame%03d.png")
-    command = ["ffmpeg", "-y", "-i", video_file, "-vf", f"fps={fps}", frame_pattern]
+    command = [FFMPEG_EXE, "-y", "-i", video_file, "-vf", f"fps={fps}", frame_pattern]
     logging.info(f"Extracting frames from video via ffmpeg: fps={fps}")
     try:
         subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=False)
     except Exception as e:
         logging.warning(f"ffmpeg extraction failed: {e}")
+        return []
 
     # Collect extracted frames
     frame_files = [os.path.join(output_dir, f) for f in os.listdir(output_dir) if f.endswith(".png")]
@@ -127,7 +160,7 @@ def get_audio_duration(audio_file):
         logging.warning(f"get_audio_duration: file not found: {audio_file}")
         return None
     try:
-        audio = AudioSegment.from_file(audio_file, format="mp3")
+        audio = AudioSegment.from_file(audio_file)
         duration_seconds = len(audio) / 1000.0
         return duration_seconds
     except Exception as e:
@@ -142,9 +175,9 @@ def loop_sound(audio_file, target_duration):
     Returns the path to the resulting audio file, or None on failure.
     """
     # DEFENSIVE CHECK: ensure input exists
-    if not os.path.exists(audio_file):
+    if not audio_file or not os.path.exists(audio_file):
         logging.warning(f"loop_sound: input audio file does not exist: {audio_file}")
-        return None
+        return _create_silent_audio(target_duration, out_path=os.path.join(BASE_DIR, "looped_effect.mp3"))
 
     # Name for looped file: include target_duration in name
     base, ext = os.path.splitext(os.path.basename(audio_file))
@@ -165,12 +198,12 @@ def loop_sound(audio_file, target_duration):
         audio = AudioSegment.from_file(audio_file)
     except Exception as e:
         logging.error(f"Error loading audio file {audio_file}: {e}")
-        return None  # fallback
+        return _create_silent_audio(target_duration, out_path=looped_path)  # fallback
 
     original_duration = len(audio) / 1000.0
     if original_duration <= 0:
         logging.warning(f"Original audio has zero length: {audio_file}")
-        return None
+        return _create_silent_audio(target_duration, out_path=looped_path)
     loops_needed = int(target_duration / original_duration) + 1
     full_audio = audio * loops_needed  # Repeat the audio
     trimmed_audio = full_audio[:int(target_duration * 1000)]
@@ -180,7 +213,7 @@ def loop_sound(audio_file, target_duration):
         return looped_path
     except Exception as e:
         logging.error(f"Failed exporting looped audio: {e}")
-        return None  # fallback
+        return _create_silent_audio(target_duration, out_path=looped_path)  # fallback
 
 def trim_audio(audio_file, max_duration=30):
     """
@@ -210,15 +243,15 @@ def trim_audio(audio_file, max_duration=30):
         audio = AudioSegment.from_file(audio_file)
     except Exception as e:
         logging.error(f"Error loading audio file {audio_file}: {e}")
-        return None
-    trimmed_audio = audio[:max_duration * 1000]  # Trim to max_duration seconds
+        return _create_silent_audio(max_duration, out_path=trimmed_path)
+    trimmed_audio = audio[:int(max_duration * 1000)]  # Trim to max_duration seconds
     try:
         trimmed_audio.export(trimmed_path, format="mp3")
         logging.info(f"Created trimmed audio: {trimmed_name}")
         return trimmed_path
     except Exception as e:
         logging.error(f"Failed exporting trimmed audio: {e}")
-        return None
+        return _create_silent_audio(max_duration, out_path=trimmed_path)
 
 # === END: Performance enhancements ===
 
@@ -267,6 +300,13 @@ def fetch_voiceover(quote, api_key):
     voiceover_file = None
     _voiceover_cached_quote = None
 
+    if not api_key:
+        logging.warning("VOICE_RSS_API_KEY not set; using silent fallback audio")
+        out = _create_silent_audio(4, out_path="voiceover.mp3")
+        voiceover_file = out
+        _voiceover_cached_quote = quote
+        return voiceover_file
+
     # Download new voiceover for the current quote
     url = "https://api.voicerss.org/"
     params = {
@@ -282,6 +322,19 @@ def fetch_voiceover(quote, api_key):
     try:
         response = requests.get(url, params=params, timeout=10)
         response.raise_for_status()
+        ct = response.headers.get("Content-Type", "")
+        if "audio" not in ct.lower() and not response.content.startswith(b"ID3"):
+            logging.error("TTS returned non-audio content; using silent fallback")
+            out = _create_silent_audio(4, out_path="voiceover.mp3")
+            voiceover_file = out
+            _voiceover_cached_quote = quote
+            return voiceover_file
+        if len(response.content) < 1000:
+            logging.warning("TTS returned suspiciously small payload; using silent fallback")
+            out = _create_silent_audio(4, out_path="voiceover.mp3")
+            voiceover_file = out
+            _voiceover_cached_quote = quote
+            return voiceover_file
         file_path = "voiceover.mp3"
         with open(file_path, "wb") as f:
             f.write(response.content)
@@ -291,7 +344,12 @@ def fetch_voiceover(quote, api_key):
         return voiceover_file
     except requests.exceptions.RequestException as e:
         logging.error(f"Error fetching voiceover: {e}")
-    return None
+    except Exception as e:
+        logging.error(f"Error saving voiceover: {e}")
+    out = _create_silent_audio(4, out_path="voiceover.mp3")
+    voiceover_file = out
+    _voiceover_cached_quote = quote
+    return voiceover_file
 
 def create_quote_mobjects(quote_text, quote_author, frame_width, frame_height):
     """
@@ -379,7 +437,11 @@ def fetch_pexels_video(query="nature", per_page=15):
         # Prefer medium quality if available, else pick random
         file_url = None
         for vf in video_files:
-            if vf.get("quality") and "sd" in vf.get("quality").lower() and vf.get("link"):
+            q = vf.get("quality")
+            if not isinstance(q, str):
+                logging.debug(f"Skipping non-string quality value in Pexels file entry: {q!r}")
+                continue
+            if q and "sd" in q.lower() and vf.get("link"):
                 file_url = vf["link"]
                 break
         if not file_url:
@@ -436,7 +498,7 @@ def fetch_pixabay_video(query="nature", per_page=20):
         vids = hit.get("videos", {})
         file_url = None
         # prefer medium/large
-        for size in ("medium","large","small","tiny"):
+        for size in ("medium", "large", "small", "tiny"):
             if vids.get(size) and vids[size].get("url"):
                 file_url = vids[size]["url"]
                 break
@@ -541,9 +603,12 @@ class AnimatedQuoteWithBackground(Scene):
 
         # Now that total_duration is known, prepare/loop background sound trimmed to total_duration (if available)
         if os.path.exists(SOUND_PATH):
-            looped_effect = loop_sound(SOUND_PATH, total_duration)
-            if looped_effect and os.path.exists(looped_effect):
-                self.add_sound(looped_effect, gain=-5)
+            try:
+                looped_effect = loop_sound(SOUND_PATH, total_duration)
+                if looped_effect and os.path.exists(looped_effect):
+                    self.add_sound(looped_effect, gain=-5)
+            except Exception as e:
+                logging.warning(f"Background sound loading failed: {e}")
         else:
             logging.warning(f"Background sound file not found at {SOUND_PATH}.")
 
@@ -640,5 +705,3 @@ if __name__ == '__main__':
         if os.path.exists(VIDEO_PATH):
             extract_video_frames(VIDEO_PATH, fps=30)
     pass
-
-
