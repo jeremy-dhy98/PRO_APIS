@@ -254,28 +254,66 @@ def trim_audio(audio_file, max_duration=30):
         return _create_silent_audio(max_duration, out_path=trimmed_path)
 
 # === END: Performance enhancements ===
-
-def fetch_quote():
-    """Fetches a random motivational quote from ZenQuotes API."""
+def fetch_quote(max_attempts=3, timeout=10):
     global quote_data
-    # Always fetch a fresh quote; do not reuse previous quote_data
     url = "https://zenquotes.io/api/random"
-    try:
-        response = requests.get(url, timeout=10)
-        response.raise_for_status()
-        data = response.json()
-        logging.info(f"Fetched data: {data}")
-        if isinstance(data, list) and data:
-            result = {"quote": data[0].get("q", "No quote found"),
-                      "author": data[0].get("a", "Unknown")}
-            quote_data = result
-            return result
-    except requests.exceptions.RequestException as e:
-        logging.error(f"Error fetching quote: {e}")
-    # On error, still update global to avoid stale
+
+    for attempt in range(1, max_attempts + 1):
+        try:
+            resp = requests.get(url, timeout=timeout)
+            resp.raise_for_status()
+
+            try:
+                data = resp.json()
+            except ValueError as e:
+                raise RuntimeError(f"Invalid JSON from quote API: {e}") from e
+
+            if isinstance(data, list) and data:
+                item = data[0] or {}
+                quote_data = {
+                    "quote": item.get("q", "No quote found"),
+                    "author": item.get("a", "Unknown"),
+                }
+                logging.info(f"Fetched quote: {quote_data}")
+                return quote_data
+
+            raise RuntimeError("Quote API returned unexpected or empty data.")
+
+        except requests.HTTPError as e:
+            status = getattr(e.response, "status_code", None)
+            body = ""
+            if e.response is not None:
+                try:
+                    body = e.response.text[:300]
+                except Exception:
+                    pass
+
+            logging.error(f"fetch_quote HTTP error on attempt {attempt}/{max_attempts}: {status} {body}")
+
+            retryable = status in {429} or (status is not None and 500 <= status < 600)
+            if retryable and attempt < max_attempts:
+                wait = (2 ** (attempt - 1)) + random.uniform(0, 0.5)
+                time.sleep(wait)
+                continue
+            break
+
+        except (requests.Timeout, requests.ConnectionError, requests.RequestException) as e:
+            logging.error(f"fetch_quote request error on attempt {attempt}/{max_attempts}: {e}")
+            if attempt < max_attempts:
+                wait = (2 ** (attempt - 1)) + random.uniform(0, 0.5)
+                time.sleep(wait)
+                continue
+            break
+
+        except Exception as e:
+            logging.error(f"fetch_quote unexpected error: {e}")
+            break
+
     result = {"quote": "No quote found", "author": "Unknown"}
     quote_data = result
+    logging.info(f"Using fallback quote: {quote_data}")
     return result
+
 
 def fetch_voiceover(quote, api_key):
     """Fetches voiceover for the given quote using VoiceRSS API (always fetch new)."""

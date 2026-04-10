@@ -1,3 +1,4 @@
+import time
 from manim import *
 import requests
 import logging
@@ -538,21 +539,65 @@ def add_fast_pool_updater(scene, frame_paths, fast_frame_time=0.03, pool_size=12
     container.add_updater(updater)
     return container
 
-def fetch_quote():
+def fetch_quote(max_attempts=3, timeout=10):
     global quote_data
     url = "https://zenquotes.io/api/random"
-    try:
-        resp = requests.get(url, timeout=10)
-        resp.raise_for_status()
-        data = resp.json()
-        if isinstance(data, list) and data:
-            quote_data = {"quote": data[0].get("q", "No quote found"), "author": data[0].get("a", "Unknown")}
-            logging.info(f"Fetched quote: {quote_data}")
-            return quote_data
-    except Exception as e:
-        logging.error(f"fetch_quote failed: {e}")
+
+    for attempt in range(1, max_attempts + 1):
+        try:
+            resp = requests.get(url, timeout=timeout)
+            resp.raise_for_status()
+
+            try:
+                data = resp.json()
+            except ValueError as e:
+                raise RuntimeError(f"Invalid JSON from quote API: {e}") from e
+
+            if isinstance(data, list) and data:
+                item = data[0] or {}
+                quote_data = {
+                    "quote": item.get("q", "No quote found"),
+                    "author": item.get("a", "Unknown"),
+                }
+                logging.info(f"Fetched quote: {quote_data}")
+                return quote_data
+
+            raise RuntimeError("Quote API returned unexpected or empty data.")
+
+        except requests.HTTPError as e:
+            status = getattr(e.response, "status_code", None)
+            body = ""
+            if e.response is not None:
+                try:
+                    body = e.response.text[:300]
+                except Exception:
+                    pass
+
+            logging.error(f"fetch_quote HTTP error on attempt {attempt}/{max_attempts}: {status} {body}")
+
+            retryable = status in {429} or (status is not None and 500 <= status < 600)
+            if retryable and attempt < max_attempts:
+                wait = (2 ** (attempt - 1)) + random.uniform(0, 0.5)
+                time.sleep(wait)
+                continue
+            break
+
+        except (requests.Timeout, requests.ConnectionError, requests.RequestException) as e:
+            logging.error(f"fetch_quote request error on attempt {attempt}/{max_attempts}: {e}")
+            if attempt < max_attempts:
+                wait = (2 ** (attempt - 1)) + random.uniform(0, 0.5)
+                time.sleep(wait)
+                continue
+            break
+
+        except Exception as e:
+            logging.error(f"fetch_quote unexpected error: {e}")
+            break
+
     quote_data = {"quote": "No quote found", "author": "Unknown"}
+    logging.info(f"Using fallback quote: {quote_data}")
     return quote_data
+
 
 def create_quote_mobjects(quote_text, quote_author, frame_width, frame_height):
     wrapped = "\n".join(textwrap.wrap(quote_text, width=40))

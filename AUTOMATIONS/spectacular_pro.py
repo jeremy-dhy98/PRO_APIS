@@ -1,5 +1,5 @@
 from manim import *
-from manim import config
+from manim import config 
 import requests
 import logging
 import random
