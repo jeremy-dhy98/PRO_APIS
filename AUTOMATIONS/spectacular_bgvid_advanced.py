@@ -3,38 +3,38 @@ from manim import config
 import requests
 import logging
 import os
+import time
 from io import BytesIO
 from PIL import Image
 import textwrap
 from pydub import AudioSegment
 import subprocess
 import json
-import random  # for random choice in Pexels results
-import tempfile  # for temporary download if desired
+import random  
+import tempfile  
 import shutil
 import imageio_ffmpeg
 
 # Set up logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
-# Load API keys from environment variables
-cat_api_key = os.environ.get("CAT_API_KEY")
-voice_api_key = os.environ.get("VOICE_RSS_API_KEY")
-PEXELS_API_KEY = os.environ.get("PEXELS_API_KEY")
-PIXABAY_API_KEY = os.environ.get("PIXABAY_API_KEY")  # <-- added PIXABAY lookup
+# Load API keys from environment variables safely stripping hidden characters
+cat_api_key = os.environ.get("CAT_API_KEY", "").strip() or None
+voice_api_key = os.environ.get("VOICE_RSS_API_KEY", "").strip() or None
+PEXELS_API_KEY = os.environ.get("PEXELS_API_KEY", "").strip() or None
+PIXABAY_API_KEY = os.environ.get("PIXABAY_API_KEY", "").strip() or None
 
 # Global variables (no longer used for caching, but kept for structure)
 quote_data = None
 voiceover_file = None
-
-# Introduce a new global to track the last quote used for voiceover caching (not used for caching here)
 _voiceover_cached_quote = None
 
-# === BEGIN: Performance enhancements ===
-# 1) Resolve paths relative to script location
+# ==========================================================
+# PATH RESOLUTIONS & PERFORMANCE ENVIRONMENT CONFIGURATION
+# ==========================================================
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
-# Default filenames (unchanged functionality)
+# Default filenames
 VIDEO_FILENAME = "46026-447087782_medium.mp4"
 SOUND_FILENAME = "subclip.ogg"
 
@@ -45,7 +45,7 @@ SOUND_PATH = os.path.join(BASE_DIR, SOUND_FILENAME)
 FRAMES_DIR = os.path.join(BASE_DIR, "video_frames")
 METADATA_PATH = os.path.join(FRAMES_DIR, "frames_meta.json")
 
-# Explicit media directories (we will only clear these)
+# Explicit media directories
 BG_VIDEOS_DIR = os.path.join(BASE_DIR, "bg_videos")
 BG_SOUNDS_DIR = os.path.join(BASE_DIR, "bg_sounds")
 
@@ -54,20 +54,33 @@ os.makedirs(BG_VIDEOS_DIR, exist_ok=True)
 os.makedirs(BG_SOUNDS_DIR, exist_ok=True)
 os.makedirs(FRAMES_DIR, exist_ok=True)
 
-# Configure FFmpeg for pydub and subprocess use
+# ─── CRITICAL WINDOWS FFmpeg & FFPROBE PATH RESOLUTION ───
 try:
     FFMPEG_EXE = imageio_ffmpeg.get_ffmpeg_exe()
+    FFMPEG_DIR = os.path.dirname(FFMPEG_EXE)
+    
+    # Inject directory into front of system PATH for internal sub-processes and where lookups
+    os.environ["PATH"] = FFMPEG_DIR + os.pathsep + os.environ.get("PATH", "")
     os.environ["IMAGEIO_FFMPEG_EXE"] = FFMPEG_EXE
-    os.environ["PATH"] = os.path.dirname(FFMPEG_EXE) + os.pathsep + os.environ.get("PATH", "")
+    
+    # Map configuration directly into pydub
     AudioSegment.converter = FFMPEG_EXE
-    try:
+    
+    # Explicitly map ffprobe location inside imageio binaries for Windows systems
+    ffprobe_name = "ffprobe.exe" if os.name == "nt" else "ffprobe"
+    FFPROBE_EXE = os.path.join(FFMPEG_DIR, ffprobe_name)
+    
+    if os.path.exists(FFPROBE_EXE):
+        AudioSegment.ffprobe = FFPROBE_EXE
+        logging.info(f"Using FFmpeg and FFprobe binaries via imageio: {FFMPEG_DIR}")
+    else:
+        # Fallback to general binary string map if sister executable name differs
         AudioSegment.ffprobe = FFMPEG_EXE
-    except Exception:
-        pass
-    logging.info(f"Using FFmpeg binary: {FFMPEG_EXE}")
+        logging.warning("FFmpeg binary found, but specific ffprobe name was missing. Falling back to primary executable pointer.")
 except Exception as e:
     FFMPEG_EXE = None
-    logging.warning(f"Could not configure FFmpeg via imageio-ffmpeg: {e}")
+    logging.warning(f"Could not automatically configure dynamic FFmpeg variables via imageio-ffmpeg: {e}")
+
 
 def _create_silent_audio(duration_seconds, out_path):
     """Create a silent mp3 file for fallback use."""
@@ -82,13 +95,11 @@ def _create_silent_audio(duration_seconds, out_path):
     return out_path
 
 def load_frames_metadata():
-    """Load metadata dict from METADATA_PATH if exists; else return None."""
-    # CACHING DISABLED: always return None
+    """CACHING DISABLED: always return None"""
     return None
 
 def save_frames_metadata(video_path, mtime):
     """Save metadata about extracted frames."""
-    # CACHING DISABLED: still write metadata if desired, but it won't be used
     data = {"video_path": video_path, "mtime": mtime}
     try:
         os.makedirs(os.path.dirname(METADATA_PATH), exist_ok=True)
@@ -98,11 +109,7 @@ def save_frames_metadata(video_path, mtime):
         logging.warning(f"Could not write frames metadata: {e}")
 
 def extract_video_frames(video_file, fps=30):
-    """
-    Extracts frames from the given video file using FFmpeg with subprocess.
-    CACHING DISABLED: always re-extract frames.
-    Returns a list of frame file paths (absolute).
-    """
+    """Extracts frames from the given video file using FFmpeg via subprocess."""
     output_dir = FRAMES_DIR
     os.makedirs(output_dir, exist_ok=True)
 
@@ -110,28 +117,26 @@ def extract_video_frames(video_file, fps=30):
         logging.warning("FFmpeg executable not configured; cannot extract frames.")
         return []
 
-    # Determine video modification time
     try:
         video_mtime = os.path.getmtime(video_file)
     except Exception:
         video_mtime = None
 
-    # --- CACHING DISABLED: always re-extract frames ---
-    # Remove any cached metadata file
+    # Clear cached metadata files
     try:
         if os.path.exists(METADATA_PATH):
             os.remove(METADATA_PATH)
     except Exception:
         pass
 
-    # First, clear existing frames (only .png files)
+    # Clear existing .png files inside frames folder
     for fname in os.listdir(output_dir):
         if fname.endswith(".png"):
             try:
                 os.remove(os.path.join(output_dir, fname))
             except Exception:
                 pass
-    # Run ffmpeg to extract frames
+                
     frame_pattern = os.path.join(output_dir, "frame%03d.png")
     command = [FFMPEG_EXE, "-y", "-i", video_file, "-vf", f"fps={fps}", frame_pattern]
     logging.info(f"Extracting frames from video via ffmpeg: fps={fps}")
@@ -141,51 +146,39 @@ def extract_video_frames(video_file, fps=30):
         logging.warning(f"ffmpeg extraction failed: {e}")
         return []
 
-    # Collect extracted frames
     frame_files = [os.path.join(output_dir, f) for f in os.listdir(output_dir) if f.endswith(".png")]
     frame_files = sorted(frame_files)
     if frame_files:
-        # Save metadata (though not used for skipping)
         if video_mtime is not None:
             save_frames_metadata(os.path.abspath(video_file), video_mtime)
         logging.info(f"Extracted and cached {len(frame_files)} frames.")
     else:
-        logging.warning("No frames extracted; check video file.")
+        logging.warning("No frames extracted; check video file base dimensions.")
     return frame_files
 
 def get_audio_duration(audio_file):
     """Returns the duration (in seconds) of the given audio file using pydub."""
-    # DEFENSIVE CHECK: ensure file exists
     if not os.path.exists(audio_file):
         logging.warning(f"get_audio_duration: file not found: {audio_file}")
         return None
     try:
+         # Safely utilizes updated system variables configured globally
         audio = AudioSegment.from_file(audio_file)
-        duration_seconds = len(audio) / 1000.0
-        return duration_seconds
+        return len(audio) / 1000.0
     except Exception as e:
-        logging.warning(f"Could not get audio duration for {audio_file}: {e}")
+        logging.warning(f"Could not read audio duration parameters for {audio_file}: {e}")
         return None
 
 def loop_sound(audio_file, target_duration):
-    """
-    Loops the given audio file (mp3 or ogg) until the target_duration (in seconds)
-    is reached, then trims it to exactly target_duration.
-    CACHING DISABLED: always recreate the looped audio.
-    Returns the path to the resulting audio file, or None on failure.
-    """
-    # DEFENSIVE CHECK: ensure input exists
+    """Loops the given audio file until the target_duration is reached, then trims it."""
     if not audio_file or not os.path.exists(audio_file):
         logging.warning(f"loop_sound: input audio file does not exist: {audio_file}")
         return _create_silent_audio(target_duration, out_path=os.path.join(BASE_DIR, "looped_effect.mp3"))
 
-    # Name for looped file: include target_duration in name
     base, ext = os.path.splitext(os.path.basename(audio_file))
     looped_name = f"looped_{base}_{int(target_duration)}s.mp3"
     looped_path = os.path.join(BASE_DIR, looped_name)
 
-    # --- CACHING DISABLED: always recreate the looped audio ---
-    # Remove existing if present
     if os.path.exists(looped_path):
         try:
             os.remove(looped_path)
@@ -193,35 +186,30 @@ def loop_sound(audio_file, target_duration):
         except Exception:
             pass
 
-    # Perform looping
     try:
         audio = AudioSegment.from_file(audio_file)
     except Exception as e:
         logging.error(f"Error loading audio file {audio_file}: {e}")
-        return _create_silent_audio(target_duration, out_path=looped_path)  # fallback
+        return _create_silent_audio(target_duration, out_path=looped_path)
 
     original_duration = len(audio) / 1000.0
     if original_duration <= 0:
-        logging.warning(f"Original audio has zero length: {audio_file}")
+        logging.warning(f"Original audio has zero length string properties: {audio_file}")
         return _create_silent_audio(target_duration, out_path=looped_path)
+        
     loops_needed = int(target_duration / original_duration) + 1
-    full_audio = audio * loops_needed  # Repeat the audio
+    full_audio = audio * loops_needed  
     trimmed_audio = full_audio[:int(target_duration * 1000)]
     try:
         trimmed_audio.export(looped_path, format="mp3")
-        logging.info(f"Created looped audio: {looped_name}")
+        logging.info(f"Created looped audio output asset: {looped_name}")
         return looped_path
     except Exception as e:
-        logging.error(f"Failed exporting looped audio: {e}")
-        return _create_silent_audio(target_duration, out_path=looped_path)  # fallback
+        logging.error(f"Failed exporting looped audio segment: {e}")
+        return _create_silent_audio(target_duration, out_path=looped_path)
 
 def trim_audio(audio_file, max_duration=30):
-    """
-    Trims the given audio file to a maximum duration (in seconds).
-    CACHING DISABLED: always recreate trimmed audio.
-    Returns the path to the trimmed audio file, or None on failure.
-    """
-    # DEFENSIVE CHECK: ensure input exists
+    """Trims the given audio file to a maximum duration (in seconds)."""
     if not os.path.exists(audio_file):
         logging.warning(f"trim_audio: input audio file does not exist: {audio_file}")
         return None
@@ -230,108 +218,113 @@ def trim_audio(audio_file, max_duration=30):
     trimmed_name = f"trimmed_{base}_{int(max_duration)}s.mp3"
     trimmed_path = os.path.join(BASE_DIR, trimmed_name)
 
-    # --- CACHING DISABLED: always recreate trimmed audio ---
     if os.path.exists(trimmed_path):
         try:
             os.remove(trimmed_path)
-            logging.info(f"Removed stale trimmed audio: {trimmed_name}")
+            logging.info(f"Removed stale trimmed audio asset configuration: {trimmed_name}")
         except Exception:
             pass
 
-    # Perform trimming
     try:
         audio = AudioSegment.from_file(audio_file)
     except Exception as e:
-        logging.error(f"Error loading audio file {audio_file}: {e}")
+        logging.error(f"Error loading audio file properties {audio_file}: {e}")
         return _create_silent_audio(max_duration, out_path=trimmed_path)
-    trimmed_audio = audio[:int(max_duration * 1000)]  # Trim to max_duration seconds
+        
+    trimmed_audio = audio[:int(max_duration * 1000)]  
     try:
         trimmed_audio.export(trimmed_path, format="mp3")
-        logging.info(f"Created trimmed audio: {trimmed_name}")
+        logging.info(f"Created trimmed audio configuration: {trimmed_name}")
         return trimmed_path
     except Exception as e:
-        logging.error(f"Failed exporting trimmed audio: {e}")
+        logging.error(f"Failed exporting trimmed audio file structure: {e}")
         return _create_silent_audio(max_duration, out_path=trimmed_path)
 
-# === END: Performance enhancements ===
-def fetch_quote(max_attempts=3, timeout=10):
+# ─── FIX: ENHANCED INTERNET WRAPPER & PREMIUM FALLBACKS FOR QUOTES ───
+def fetch_quote(max_attempts=3, timeout=8):
     global quote_data
     url = "https://zenquotes.io/api/random"
+    
+    # Standard desktop user-agent to bypass connection drops or blocks targeting basic automation clients
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    }
+
+    # Backup strategy arrays
+    local_fallbacks = [
+        {"quote": "The only way to do great work is to love what you do.", "author": "Steve Jobs"},
+        {"quote": "Code is like humor. When you have to explain it, it’s bad.", "author": "Cory House"},
+        {"quote": "Simplicity is the soul of efficiency.", "author": "Austin Freeman"},
+        {"quote": "Before software can be reusable it first has to be usable.", "author": "Ralph Johnson"},
+        {"quote": "Make it work, make it right, make it fast.", "author": "Kent Beck"}
+    ]
 
     for attempt in range(1, max_attempts + 1):
         try:
-            resp = requests.get(url, timeout=timeout)
+            resp = requests.get(url, headers=headers, timeout=timeout)
             resp.raise_for_status()
 
             try:
                 data = resp.json()
             except ValueError as e:
-                raise RuntimeError(f"Invalid JSON from quote API: {e}") from e
+                raise RuntimeError(f"Invalid JSON response sequence from target API endpoint: {e}") from e
 
             if isinstance(data, list) and data:
                 item = data[0] or {}
                 quote_data = {
-                    "quote": item.get("q", "No quote found"),
-                    "author": item.get("a", "Unknown"),
+                    "quote": item.get("q", "No quote found").strip(),
+                    "author": item.get("a", "Unknown").strip(),
                 }
-                logging.info(f"Fetched quote: {quote_data}")
+                logging.info(f"Successfully fetched server side quote contents: {quote_data}")
                 return quote_data
 
-            raise RuntimeError("Quote API returned unexpected or empty data.")
+            raise RuntimeError("Quote API returned unexpected format structural type data layers.")
 
         except requests.HTTPError as e:
             status = getattr(e.response, "status_code", None)
             body = ""
             if e.response is not None:
                 try:
-                    body = e.response.text[:300]
+                    body = e.response.text[:150]
                 except Exception:
                     pass
-
-            logging.error(f"fetch_quote HTTP error on attempt {attempt}/{max_attempts}: {status} {body}")
-
-            retryable = status in {429} or (status is not None and 500 <= status < 600)
-            if retryable and attempt < max_attempts:
+            logging.error(f"fetch_quote HTTP error framework on attempt {attempt}/{max_attempts}: {status} {body}")
+            if status == 429 or (status is not None and 500 <= status < 600):
                 wait = (2 ** (attempt - 1)) + random.uniform(0, 0.5)
                 time.sleep(wait)
                 continue
             break
-
         except (requests.Timeout, requests.ConnectionError, requests.RequestException) as e:
-            logging.error(f"fetch_quote request error on attempt {attempt}/{max_attempts}: {e}")
+            logging.error(f"fetch_quote network tracking request timeout error on attempt {attempt}/{max_attempts}: {e}")
             if attempt < max_attempts:
                 wait = (2 ** (attempt - 1)) + random.uniform(0, 0.5)
                 time.sleep(wait)
                 continue
             break
-
         except Exception as e:
-            logging.error(f"fetch_quote unexpected error: {e}")
+            logging.error(f"Unexpected system tracking exception catch inside fetch_quote loop: {e}")
             break
 
-    result = {"quote": "No quote found", "author": "Unknown"}
+    # High quality local fallback configuration assigned on failure 
+    result = random.choice(local_fallbacks)
     quote_data = result
-    logging.info(f"Using fallback quote: {quote_data}")
+    logging.info(f"Using high quality local backup quote module: {quote_data}")
     return result
 
-
 def fetch_voiceover(quote, api_key):
-    """Fetches voiceover for the given quote using VoiceRSS API (always fetch new)."""
+    """Fetches voiceover for the given quote using VoiceRSS API."""
     global voiceover_file, _voiceover_cached_quote
 
-    # Always fetch new voiceover for the quote
-    # Remove old cached file if it exists
+    # Clean old target structures on disk
     if voiceover_file and os.path.exists(voiceover_file):
         try:
             os.remove(voiceover_file)
-            logging.info("Removed previous voiceover file to fetch new")
         except Exception as e:
-            logging.warning(f"Could not remove old voiceover: {e}")
-    # Also if VOICEOVER_FILENAME exists from disk, remove it
+            logging.warning(f"Could not clear target location voiceover: {e}")
+            
     if os.path.exists("voiceover.mp3"):
         try:
             os.remove("voiceover.mp3")
-            logging.info("Removed existing voiceover.mp3 on disk to fetch new")
         except Exception:
             pass
 
@@ -339,13 +332,12 @@ def fetch_voiceover(quote, api_key):
     _voiceover_cached_quote = None
 
     if not api_key:
-        logging.warning("VOICE_RSS_API_KEY not set; using silent fallback audio")
+        logging.warning("VOICE_RSS_API_KEY environment lookup failed; routing silent audio matrix structure.")
         out = _create_silent_audio(4, out_path="voiceover.mp3")
         voiceover_file = out
         _voiceover_cached_quote = quote
         return voiceover_file
 
-    # Download new voiceover for the current quote
     url = "https://api.voicerss.org/"
     params = {
         "key": api_key,
@@ -358,63 +350,57 @@ def fetch_voiceover(quote, api_key):
         "v": "John"
     }
     try:
-        response = requests.get(url, params=params, timeout=10)
+        response = requests.get(url, params=params, timeout=12)
         response.raise_for_status()
         ct = response.headers.get("Content-Type", "")
         if "audio" not in ct.lower() and not response.content.startswith(b"ID3"):
-            logging.error("TTS returned non-audio content; using silent fallback")
+            logging.error("TTS endpoint engine returned non-audio body headers; dropping payload.")
             out = _create_silent_audio(4, out_path="voiceover.mp3")
             voiceover_file = out
             _voiceover_cached_quote = quote
             return voiceover_file
+            
         if len(response.content) < 1000:
-            logging.warning("TTS returned suspiciously small payload; using silent fallback")
+            logging.warning("TTS system returned broken package length; applying safe silent container setup.")
             out = _create_silent_audio(4, out_path="voiceover.mp3")
             voiceover_file = out
             _voiceover_cached_quote = quote
             return voiceover_file
+            
         file_path = "voiceover.mp3"
         with open(file_path, "wb") as f:
             f.write(response.content)
-        logging.info(f"Downloaded new voiceover to {file_path}")
+        logging.info(f"Downloaded new voiceover asset cleanly to location: {file_path}")
         voiceover_file = file_path
         _voiceover_cached_quote = quote
         return voiceover_file
-    except requests.exceptions.RequestException as e:
-        logging.error(f"Error fetching voiceover: {e}")
     except Exception as e:
-        logging.error(f"Error saving voiceover: {e}")
+        logging.error(f"Error fetching/saving automation audio voiceover modules: {e}")
+        
     out = _create_silent_audio(4, out_path="voiceover.mp3")
     voiceover_file = out
     _voiceover_cached_quote = quote
     return voiceover_file
 
 def create_quote_mobjects(quote_text, quote_author, frame_width, frame_height):
-    """
-    Creates two formatted text objects:
-      - A main quote mobject with proper wrapping and scaling.
-      - An author mobject.
-    """
-    # Wrap the quote text for proper line breaks.
+    """Creates properly formatted text layout components for Manim render matrix configurations."""
     wrapped_quote = "\n".join(textwrap.wrap(quote_text, width=40))
     
-    # Create the quote mobject.
     quote_mobject = Paragraph(wrapped_quote, alignment="center", line_spacing=0.6)
     quote_mobject.set_color_by_gradient(WHITE, YELLOW)
-    max_width = frame_width * 0.8  # 80% of screen width
-    max_height = frame_height * 0.5  # 50% of screen height
+    
+    max_width = frame_width * 0.8  
+    max_height = frame_height * 0.5  
     quote_mobject.set_width(min(quote_mobject.width, max_width))
     quote_mobject.set_height(min(quote_mobject.height, max_height))
     
-    # Create a separate author mobject.
     author_mobject = Text(f"- {quote_author}", font_size=24)
     author_mobject.set_color(YELLOW)
     
     return quote_mobject, author_mobject
 
-# --- helper to stream-download safely (added) ---
 def _download_stream_to(path, url, headers=None, timeout=30):
-    """Stream a URL to a temp .part file and atomically rename on success."""
+    """Stream a URL to a temp file and atomically rename on success."""
     tmp = path + ".part"
     try:
         with requests.get(url, stream=True, headers=(headers or {}), timeout=timeout) as r:
@@ -429,10 +415,9 @@ def _download_stream_to(path, url, headers=None, timeout=30):
             except Exception:
                 pass
         os.rename(tmp, path)
-        logging.info(f"Saved downloaded file to {path}")
         return True
     except Exception as e:
-        logging.warning(f"Download failed for {url}: {e}")
+        logging.warning(f"Download stream pipeline mapping failed for target {url}: {e}")
         try:
             if os.path.exists(tmp):
                 os.remove(tmp)
@@ -441,13 +426,9 @@ def _download_stream_to(path, url, headers=None, timeout=30):
         return False
 
 def fetch_pexels_video(query="nature", per_page=15):
-    """
-    Fetch a random short video from Pexels matching `query`. Downloads it locally
-    (overwriting any previous fetch at a fixed filename), and returns the local file path.
-    If PEXELS_API_KEY is not set or any error occurs, returns None.
-    """
+    """Fetch a random short video from Pexels matching `query`."""
     if not PEXELS_API_KEY:
-        logging.warning("PEXABLS_API_KEY not set; skipping Pexels fetch.")
+        logging.warning("PEXELS_API_KEY environment mapping missing; bypassing query configuration.")
         return None
     search_url = "https://api.pexels.com/videos/search"
     headers = {"Authorization": PEXELS_API_KEY}
@@ -457,27 +438,23 @@ def fetch_pexels_video(query="nature", per_page=15):
         resp.raise_for_status()
         data = resp.json()
     except Exception as e:
-        logging.warning(f"Pexels search failed: {e}")
+        logging.warning(f"Pexels network query module search failed: {e}")
         return None
 
     videos = data.get("videos", [])
     if not videos:
-        logging.info("Pexels search returned no videos.")
         return None
 
-    # Pick a random video from results
     random.shuffle(videos)
     for choice in videos:
         video_files = choice.get("video_files", [])
         if not video_files:
             continue
 
-        # Prefer medium quality if available, else pick random
         file_url = None
         for vf in video_files:
             q = vf.get("quality")
             if not isinstance(q, str):
-                logging.debug(f"Skipping non-string quality value in Pexels file entry: {q!r}")
                 continue
             if q and "sd" in q.lower() and vf.get("link"):
                 file_url = vf["link"]
@@ -489,32 +466,21 @@ def fetch_pexels_video(query="nature", per_page=15):
         if not file_url:
             continue
 
-        # Download video to a fixed local path, e.g., "pexels_bg.mp4" in BASE_DIR
         local_filename = os.path.join(BASE_DIR, "pexels_bg.mp4")
         try:
-            logging.info(f"Downloading Pexels video for background: {file_url}")
+            logging.info(f"Downloading background video configuration via Pexels server: {file_url}")
             success = _download_stream_to(local_filename, file_url, headers=headers)
             if success:
-                logging.info(f"Saved Pexels background video to: {local_filename}")
                 return local_filename
         except Exception as e:
-            logging.warning(f"Failed to download a Pexels candidate: {e}")
-            try:
-                if os.path.exists(local_filename + ".part"):
-                    os.remove(local_filename + ".part")
-            except Exception:
-                pass
+            logging.warning(f"Failed handling specific media data streams: {e}")
             continue
     return None
 
-# --- ADDED: Pixabay fallback fetch (new) ---
 def fetch_pixabay_video(query="nature", per_page=20):
-    """
-    Fetch one video from Pixabay for `query` and save to local file.
-    Returns local path on success, None on failure.
-    """
+    """Fetch one video from Pixabay for `query` and save to local file."""
     if not PIXABAY_API_KEY:
-        logging.info("PIXABAY_API_KEY not set; skipping Pixabay fetch.")
+        logging.info("PIXABAY_API_KEY environment target empty; passing engine setup sequence.")
         return None
     url = "https://pixabay.com/api/videos/"
     params = {"key": PIXABAY_API_KEY, "q": query, "per_page": per_page}
@@ -523,19 +489,17 @@ def fetch_pixabay_video(query="nature", per_page=20):
         resp.raise_for_status()
         data = resp.json()
     except Exception as e:
-        logging.warning(f"Pixabay search failed: {e}")
+        logging.warning(f"Pixabay server query modules search dropped: {e}")
         return None
 
     hits = data.get("hits", [])
     if not hits:
-        logging.info("Pixabay returned no video hits.")
         return None
 
     random.shuffle(hits)
     for hit in hits:
         vids = hit.get("videos", {})
         file_url = None
-        # prefer medium/large
         for size in ("medium", "large", "small", "tiny"):
             if vids.get(size) and vids[size].get("url"):
                 file_url = vids[size]["url"]
@@ -543,36 +507,30 @@ def fetch_pixabay_video(query="nature", per_page=20):
         if not file_url:
             continue
         local_filename = os.path.join(BASE_DIR, "pixabay_bg.mp4")
-        logging.info(f"Pixabay: trying to download {file_url}")
+        logging.info(f"Pixabay download link resolved, capturing content streams: {file_url}")
         success = _download_stream_to(local_filename, file_url)
         if success and os.path.exists(local_filename):
-            logging.info(f"Saved Pixabay background video to: {local_filename}")
             return local_filename
     return None
 
-# --- ADDED: combined fetch that tries Pexels then Pixabay for a topic (new) ---
 def fetch_background_video_for_topic(topic="nature"):
     logging.info(f"Attempting to fetch fresh background video for topic: '{topic}'")
-    # Try Pexels first
     p = fetch_pexels_video(topic)
     if p:
-        logging.info("Fetched background from Pexels.")
+        logging.info("Successfully fetched background source target using Pexels layer engines.")
         return p
-    # Fallback to Pixabay
     q = fetch_pixabay_video(topic)
     if q:
-        logging.info("Fetched background from Pixabay.")
+        logging.info("Successfully fetched background source target using Pixabay layer engines.")
         return q
-    logging.warning("Could not fetch background from Pexels or Pixabay for topic '%s'." % topic)
+    logging.warning("Could not gather online live video backgrounds mapping for item '%s'. Defaulting to local media assets storage." % topic)
     return None
+
 
 class AnimatedQuoteWithBackground(Scene):
     def construct(self):
-        # Set total duration of the scene (in seconds) — default, may be adjusted below
         total_duration = 7
 
-        # ---- NEW: clear prior downloaded background and frames to force fresh fetch every run ----
-        # Clear only the designated media directories so we do not remove notebooks/scripts.
         def _remove_path_safe(path):
             try:
                 if os.path.islink(path) or os.path.isfile(path):
@@ -580,127 +538,107 @@ class AnimatedQuoteWithBackground(Scene):
                 elif os.path.isdir(path):
                     shutil.rmtree(path)
             except Exception:
-                logging.debug(f"Failed to remove {path}; ignoring.")
+                pass
 
         def _clear_media_dir(dirpath, preserve_names=()):
-            """
-            Remove all files/folders inside dirpath except names listed in preserve_names.
-            Does NOT touch dirpath itself or anything outside it.
-            """
             if not os.path.isdir(dirpath):
                 return
             for name in os.listdir(dirpath):
                 if name in preserve_names:
-                    logging.info(f"Preserving {os.path.join(dirpath, name)}")
+                    logging.info(f"Preserving explicit module file target: {os.path.join(dirpath, name)}")
                     continue
                 _remove_path_safe(os.path.join(dirpath, name))
 
         logging.info("Clearing previous background files & frames (inside designated media dirs only).")
-        # Preserve subclip.ogg filename if present in BG_SOUNDS_DIR
         preserve_name = os.path.basename(SOUND_PATH)
         _clear_media_dir(BG_VIDEOS_DIR, preserve_names=())
         _clear_media_dir(BG_SOUNDS_DIR, preserve_names=(preserve_name,))
-        # Clear frames directory fully (we will re-extract frames)
         _clear_media_dir(FRAMES_DIR, preserve_names=())
 
-        # Also remove known temporary downloaded background files in BASE_DIR (explicit whitelist)
         for tmp_name in ("pexels_bg.mp4", "pixabay_bg.mp4"):
             tmp_path = os.path.join(BASE_DIR, tmp_name)
             if os.path.exists(tmp_path):
                 _remove_path_safe(tmp_path)
 
-        # === Fetch Background Video topic selection happens later; first fetch quote + voiceover ===
-
-        # === Quote and Voiceover Logic ===
+        # Quote and Voiceover Logic
         quote_info = fetch_quote()
         raw = quote_info.get('quote', 'No quote found')
         display_q = f'"{raw}"'
         author = quote_info.get('author', 'Unknown')
 
-        # Fetch voiceover (always fetch new)
         audio = fetch_voiceover(raw, voice_api_key)
 
-        # If we got an audio file, measure its duration and set total_duration accordingly (with small padding)
         measured_voice_dur = None
         if audio and os.path.exists(audio):
             try:
+                # Utilizes global paths assigned natively inside the script environment matrix configuration layout
                 measured_voice_dur = AudioSegment.from_file(audio).duration_seconds
-                logging.info(f"Measured voiceover duration: {measured_voice_dur:.2f}s")
+                logging.info(f"Measured voiceover duration tracking logic output: {measured_voice_dur:.2f}s")
             except Exception as e:
-                logging.warning(f"Could not measure voiceover duration: {e}")
+                logging.warning(f"Could not calculate precise tracking lengths directly from metadata: {e}")
                 measured_voice_dur = None
 
         if measured_voice_dur and measured_voice_dur > 0:
             total_duration = float(measured_voice_dur) + 0.25
-            # cap to a reasonable maximum to avoid extremely long videos
             if total_duration > 120:
                 total_duration = 120.0
-            logging.info(f"Scene total_duration set from voiceover: {total_duration:.2f}s")
+            logging.info(f"Scene total_duration set from voiceover file content specifications: {total_duration:.2f}s")
         else:
-            logging.info(f"Using fallback/default total_duration: {total_duration:.2f}s")
+            logging.info(f"Using default total_duration matrix layout: {total_duration:.2f}s")
 
-        # Now that total_duration is known, prepare/loop background sound trimmed to total_duration (if available)
         if os.path.exists(SOUND_PATH):
             try:
                 looped_effect = loop_sound(SOUND_PATH, total_duration)
                 if looped_effect and os.path.exists(looped_effect):
                     self.add_sound(looped_effect, gain=-5)
             except Exception as e:
-                logging.warning(f"Background sound loading failed: {e}")
+                logging.warning(f"Background sound loading pipeline failed on timeline integration step: {e}")
         else:
-            logging.warning(f"Background sound file not found at {SOUND_PATH}.")
+            logging.warning(f"Background ambient tracking sound module file not detected at pathway location: {SOUND_PATH}")
 
-        # === Fetch Background Video ===
-        # Choose a topic at random from ['nature','birds','art'] unless overridden by env var
+        # Fetch Background Video
         env_topic = os.environ.get("BG_QUERY", None)
         if env_topic:
-            chosen_topic = env_topic
-            logging.info(f"BG_QUERY provided via env: '{chosen_topic}'")
+            chosen_topic = env_topic.strip()
+            logging.info(f"BG_QUERY parameter loaded explicitly via system env: '{chosen_topic}'")
         else:
             chosen_topic = random.choice(["nature", "birds", "art"])
-            logging.info(f"No BG_QUERY set — randomly selected topic: '{chosen_topic}'")
+            logging.info(f"No specific environment BG_QUERY parsed. Random fallback selection applied: '{chosen_topic}'")
 
-        # Try to fetch a fresh video for chosen topic (Pexels -> Pixabay). If not found,
-        # fall back to the local VIDEO_PATH that was the original behavior.
         fetched_video = fetch_background_video_for_topic(chosen_topic)
         video_background_file = fetched_video if (fetched_video and os.path.exists(fetched_video)) else VIDEO_PATH
 
-        # === BREAK MEDIA INTO CONSTITUENT IMAGES (RAPID DISPLAY) ===
-        # Extract at high FPS (30) to get a dense pool of frames
+        # Break Media Into Constituent Images
         video_frames = extract_video_frames(video_background_file, fps=30)
         
         if not video_frames:
-            logging.error("No background frames available. Scene will have no background.")
+            logging.error("No background frames available. Scene will drop visual backdrop channels.")
             bg_pool = []
         else:
-            # Preload a pool of ImageMobjects for the rapid-flicker effect
-            # We scale them to fit the frame dimensions
             bg_pool = [
                 ImageMobject(img).scale_to_fit_width(config.frame_width) 
-                for img in video_frames[:150] # Limit pool to manage memory
+                for img in video_frames[:150] 
             ]
 
-        # --- UPDATED FIX: Use set_z_index and self.add() to ensure background stays behind text ---
+        # Use set_z_index and self.add() to ensure background stays behind text elements
         if bg_pool:
             bg_container = bg_pool[0].copy()
-            bg_container.set_z_index(-10) # Force background to the bottom layer
+            bg_container.set_z_index(-10) 
             self.add(bg_container) 
 
-            # Define the "Very Fast Display" functionality via an Updater
-            # This changes the image 15 times per second (strobe effect)
             def rapid_image_swap(mob, dt):
-                swap_speed = 15  # Images per second
+                swap_speed = 15  
                 index = int((self.time * swap_speed) % len(bg_pool))
                 mob.become(bg_pool[index])
 
             bg_container.add_updater(rapid_image_swap)
 
-        # Quote + voiceover mobjects
+        # Mobjects setup
         q_mobj, a_mobj = create_quote_mobjects(display_q, author, self.camera.frame_width, self.camera.frame_height)
         q_mobj.move_to(UP * 0.5)
         a_mobj.next_to(q_mobj, DOWN, buff=0.4)
 
-        # Add voiceover: if it exists, trim if longer than the scene; else add as-is
+        # Render voice track layers onto processing tracks
         if audio and os.path.exists(audio):
             try:
                 voice_len = AudioSegment.from_file(audio).duration_seconds
@@ -713,8 +651,7 @@ class AnimatedQuoteWithBackground(Scene):
             else:
                 self.add_sound(audio, gain=+10)
 
-        # === TEXT ANIMATION (Concurrently with Background Strobe) ===
-        # Ensure text has a higher z_index (default is 0) so it stays on top
+        # Text Animations Timeline
         time_fadein = 0.8
         time_write = 2
         time_color = 1
@@ -727,18 +664,15 @@ class AnimatedQuoteWithBackground(Scene):
         self.play(q_mobj.animate.scale(1.1), run_time=time_scale)
         self.play(FadeIn(a_mobj, shift=UP), run_time=time_author)
 
-        # Calculate remaining time to hit exactly total_duration
         time_used = time_fadein + time_write + time_color + time_scale + time_author
         remaining_time = total_duration - time_used
 
-        # Only call self.wait() if strictly positive to avoid Manim ValueError for zero duration
         if remaining_time > 1e-6:
             self.wait(remaining_time)
         else:
-            logging.info(f"No remaining time to wait (remaining={remaining_time}); skipping self.wait().")
+            logging.info(f"Skipping wait layout block. Render steps fully match audio tracks (remaining={remaining_time})")
 
 if __name__ == '__main__':
-    # Optionally pre-extract before rendering (set env var AUTO_PREEXTRACT=1)
     if os.environ.get("AUTO_PREEXTRACT", "0") in ("1", "true", "yes"):
         if os.path.exists(VIDEO_PATH):
             extract_video_frames(VIDEO_PATH, fps=30)

@@ -16,9 +16,9 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(
 # Resolve paths relative to the script location
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
-# Load API keys from environment variables
-cat_api_key = os.environ.get("CAT_API_KEY")
-voice_api_key = os.environ.get("VOICE_RSS_API_KEY")
+# Load API keys from environment variables and safely strip hidden whitespace characters
+cat_api_key = os.environ.get("CAT_API_KEY", "").strip() or None
+voice_api_key = os.environ.get("VOICE_RSS_API_KEY", "").strip() or None
 
 # Define effect sound file (ensure this file exists)
 cool_effect_file = os.path.join(BASE_DIR, "subclip.ogg")
@@ -28,17 +28,34 @@ LOOPED_EFFECT_FILE = os.path.join(BASE_DIR, "looped_effect.mp3")
 TRIMMED_EFFECT_FILE = os.path.join(BASE_DIR, "trimmed_voiceover.mp3")
 SILENT_FALLBACK_FILE = os.path.join(BASE_DIR, "silent_fallback.mp3")
 
-# Configure FFmpeg for pydub and local use
+# ==========================================
+# ROBUST WINDOWS FFmpeg & FFPROBE CONFIGURATION
+# ==========================================
 try:
+    # Extract the exact binary path provided by imageio_ffmpeg
     FFMPEG_EXE = imageio_ffmpeg.get_ffmpeg_exe()
+    FFMPEG_DIR = os.path.dirname(FFMPEG_EXE)
+    
+    # Push this directory to the front of the local execution PATH environment 
+    # This ensures Windows 'where' commands and pydub sub-processes catch both ffmpeg and ffprobe
+    os.environ["PATH"] = FFMPEG_DIR + os.pathsep + os.environ.get("PATH", "")
     os.environ["IMAGEIO_FFMPEG_EXE"] = FFMPEG_EXE
-    os.environ["PATH"] = os.path.dirname(FFMPEG_EXE) + os.pathsep + os.environ.get("PATH", "")
+    
+    # Explicitly wire paths directly into pydub configurations
     AudioSegment.converter = FFMPEG_EXE
-    AudioSegment.ffmpeg = FFMPEG_EXE
-    logging.info(f"Using FFmpeg binary: {FFMPEG_EXE}")
+    
+    # Map out the corresponding ffprobe executable name depending on platform
+    ffprobe_name = "ffprobe.exe" if os.name == "nt" else "ffprobe"
+    FFPROBE_EXE = os.path.join(FFMPEG_DIR, ffprobe_name)
+    
+    if os.path.exists(FFPROBE_EXE):
+        AudioSegment.ffprobe = FFPROBE_EXE
+        logging.info(f"Successfully pinned FFmpeg & FFprobe via imageio: {FFMPEG_DIR}")
+    else:
+        logging.warning("FFmpeg binary found, but ffprobe was missing in imageio binaries directory.")
+        
 except Exception as e:
-    FFMPEG_EXE = None
-    logging.warning(f"Could not configure FFmpeg via imageio-ffmpeg: {e}")
+    logging.warning(f"Failed to dynamically configure FFmpeg path variables: {e}")
 
 def _create_silent_audio(duration_seconds, out_path=SILENT_FALLBACK_FILE):
     """Create a silent mp3 file for fallback use."""
@@ -49,23 +66,41 @@ def _create_silent_audio(duration_seconds, out_path=SILENT_FALLBACK_FILE):
     return out_path
 
 def fetch_quote():
-    """Fetches a random motivational quote from ZenQuotes API."""
+    """Fetches a random motivational quote from ZenQuotes API with explicit user-agent header."""
     url = "https://zenquotes.io/api/random"
+    # Added a standard browser user-agent header to reduce risk of connection dropouts/blocks
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    }
+    
+    # Premium local fallbacks in case network connection fails or times out completely
+    local_fallbacks = [
+        {"quote": "The only way to do great work is to love what you do.", "author": "Steve Jobs"},
+        {"quote": "Code is like humor. When you have to explain it, it’s bad.", "author": "Cory House"},
+        {"quote": "Simplicity is the soul of efficiency.", "author": "Austin Freeman"},
+        {"quote": "Before software can be reusable it first has to be usable.", "author": "Ralph Johnson"},
+        {"quote": "Make it work, make it right, make it fast.", "author": "Kent Beck"}
+    ]
+    
     try:
-        response = requests.get(url, timeout=10)
+        response = requests.get(url, headers=headers, timeout=8)
         response.raise_for_status()
         data = response.json()
         if isinstance(data, list) and data:
             return {"quote": data[0].get("q", "No quote found"),
                     "author": data[0].get("a", "Unknown")}
     except requests.exceptions.RequestException as e:
-        logging.error(f"Error fetching quote: {e}")
-    return {"quote": "No quote found", "author": "Unknown"}
-
+        logging.error(f"Error fetching quote via API: {e}. Utilizing premium local backup context.")
+        
+    return random.choice(local_fallbacks)
 def fetch_cat_image(api_key, target_width=1280, target_height=720):
     """
     Fetches a random cat image from TheCatAPI and saves it locally.
     """
+    if not api_key:
+        logging.warning("CAT_API_KEY is missing or invalid. Skipping background image.")
+        return None
+
     url = "https://api.thecatapi.com/v1/images/search"
     headers = {"x-api-key": api_key}
     try:
@@ -114,7 +149,7 @@ def fetch_voiceover(quote, api_key):
 
         ct = response.headers.get("Content-Type", "")
         if "audio" not in ct.lower() and not response.content.startswith(b"ID3"):
-            logging.error("VoiceRSS returned non-audio content; using silent fallback.")
+            logging.error(f"VoiceRSS returned non-audio content ({ct}); using silent fallback. Payload: {response.text[:100]}")
             return _create_silent_audio(4, out_path=VOICEOVER_FILE)
 
         if len(response.content) < 1000:
@@ -188,13 +223,9 @@ def trim_audio(audio_file, max_duration=30):
         return _create_silent_audio(min(max_duration, 4), out_path=TRIMMED_EFFECT_FILE)
 
 # ---------------------
-# Randomized text animation styles (INTEGRATED)
+# Randomized text animation styles
 # ---------------------
 def _glowify(mobj, layers=3, scale_step=1.04, opacity_step=0.12):
-    """
-    Create a subtle glow by stacking slightly larger, low-opacity copies behind.
-    Returns a VGroup (glow layers + original) or original on failure.
-    """
     layers_list = []
     for i in range(layers, 0, -1):
         try:
@@ -211,7 +242,6 @@ def _glowify(mobj, layers=3, scale_step=1.04, opacity_step=0.12):
         return mobj
 
 def style_handwriting(scene, quote_mobject, author_mobject, sync_duration=None, raw_text=None):
-    """Classic handwriting reveal using Write, with a safe fallback."""
     scene.add(quote_mobject)
     run = min(sync_duration * 0.6, 4.0) if sync_duration else 2.0
     try:
@@ -221,14 +251,7 @@ def style_handwriting(scene, quote_mobject, author_mobject, sync_duration=None, 
     scene.play(FadeIn(author_mobject), run_time=0.8)
 
 def style_wordbyword(scene, q_mobj, a_mobj, sync_duration=None, raw_text=None, **kwargs):
-    """
-    Word-by-word reveal with wrapping (robust signature: sync_duration).
-    - Wrap words into multiple lines constrained by max_width (based on q_mobj or camera).
-    - Animate words left->right, top->bottom with LaggedStart.
-    - Scale very long single words to fit.
-    """
     total_duration = sync_duration or 5.0
-
     text_source = None
     if raw_text:
         text_source = raw_text.strip().replace("\n", " ")
@@ -358,12 +381,6 @@ def style_wordbyword(scene, q_mobj, a_mobj, sync_duration=None, raw_text=None, *
         scene.add(a_mobj)
 
 def style_mask_reveal(scene, quote_mobject, author_mobject, sync_duration=None, raw_text=None):
-    """
-    Rotating shard reveal:
-    Several vertical 'shards' cover the quote, then rotate & slide outward
-    in a staggered (lagged) sequence revealing the quote underneath.
-    Uses sync_duration to scale animation timing when available.
-    """
     try:
         scene.add(quote_mobject)
     except Exception:
@@ -453,7 +470,6 @@ def style_mask_reveal(scene, quote_mobject, author_mobject, sync_duration=None, 
             pass
 
 def style_kinetic(scene, quote_mobject, author_mobject, sync_duration=None, raw_text=None):
-    """Write then a quick color/scale pulse for emphasis."""
     scene.add(quote_mobject)
     run = min(sync_duration * 0.45, 3.0) if sync_duration else 2.0
     try:
@@ -468,7 +484,6 @@ def style_kinetic(scene, quote_mobject, author_mobject, sync_duration=None, raw_
     scene.play(FadeIn(author_mobject), run_time=0.6)
 
 def style_pop_and_bounce(scene, quote_mobject, author_mobject, sync_duration=None, raw_text=None):
-    """Pop-in with a quick bounce and color shift."""
     q_copy = quote_mobject.copy()
     q_copy.scale(0.85)
     scene.add(q_copy)
@@ -486,7 +501,6 @@ def style_pop_and_bounce(scene, quote_mobject, author_mobject, sync_duration=Non
         pass
 
 def style_neon_glow(scene, quote_mobject, author_mobject, sync_duration=None, raw_text=None):
-    """Apply layered glow copies to create a neon effect and fade in."""
     glow = _glowify(quote_mobject, layers=3)
     try:
         glow.move_to(quote_mobject.get_center())
@@ -507,10 +521,6 @@ _ANIM_STYLES = [
 ]
 
 def play_random_text_style(scene, quote_mobject, author_mobject, sync_duration=None, raw_text=None):
-    """
-    Choose a random polished style and play it.
-    Optionally supply raw_text (string) to help word-by-word style.
-    """
     style = random.choice(_ANIM_STYLES)
     logging.info(f"Selected text animation style: {style.__name__}")
     try:
@@ -555,10 +565,6 @@ class BaseQuoteScene(Scene):
             self.add_sound(looped_effect, gain=-5)
 
     def apply_text_effects(self, quote_mobject, author_mobject, sync_duration=None):
-        """
-        Applies animation effects to both quote and author.
-        If sync_duration is provided, the total run time of the sequence will be scaled to match.
-        """
         raw_text = None
         try:
             if hasattr(quote_mobject, "get_text"):
