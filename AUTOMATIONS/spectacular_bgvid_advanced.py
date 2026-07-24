@@ -537,6 +537,12 @@ def fetch_and_save_hd_images(target_count=5):
     logging.info(f"Done! Successfully saved {saved_count} new unique illustrations to: {NATURE_DIR}")
     return saved_count
 
+# Categories list 
+NATURE_CATEGORIES = [
+    "nature", "landscape", "mountains", "forest", 
+    "waterfall", "ocean", "wildlife", "sunset", "sky"
+]
+
 def fetch_nature_video(
     target_dir: str = r"C:\Users\Jeremy\Desktop\Nature",
     min_duration: int = 45,
