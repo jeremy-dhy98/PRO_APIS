@@ -17,10 +17,10 @@ import imageio_ffmpeg
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
 # Load API keys from environment variables
-cat_api_key = os.environ.get("CAT_API_KEY").strip()
-voice_api_key = os.environ.get("VOICE_RSS_API_KEY").strip()
-PIXABAY_API_KEY = os.environ.get("PIXABAY_API_KEY").strip()
-PEXELS_API_KEY = os.environ.get("PEXELS_API_KEY").strip()
+cat_api_key = (os.environ.get("CAT_API_KEY") or "").strip()
+voice_api_key = (os.environ.get("VOICE_RSS_API_KEY") or "").strip()
+PIXABAY_API_KEY = (os.environ.get("PIXABAY_API_KEY") or "").strip()
+PEXELS_API_KEY = (os.environ.get("PEXELS_API_KEY") or "").strip()
 
 # Directories and filenames
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -30,6 +30,9 @@ FRAMES_DIR = os.path.join(BASE_DIR, "video_frames")
 EXPECTED_VIDEO = os.path.normpath(os.path.join(BASE_DIR, "219305_tiny.mp4"))
 EXPECTED_SOUND = os.path.normpath(os.path.abspath(os.path.join(BASE_DIR, "subclip.ogg")))
 CAT_IMAGE_FILENAME = "cat_image.jpg"
+
+# Target directory for the 5 new HD Nature images
+NATURE_IMAGES_DIR = r"C:\Users\Jeremy\Desktop\Nature"
 
 os.makedirs(BG_VIDEOS_DIR, exist_ok=True)
 os.makedirs(BG_SOUNDS_DIR, exist_ok=True)
@@ -102,9 +105,162 @@ def _download_stream_to(path, url, headers=None, timeout=30):
             pass
         return False
 
+# =========================================================================
+# NEW ENHANCEMENT: Fetch 5 unique HD Nature images per run
+# =========================================================================
+def fetch_hd_nature_images(target_dir=NATURE_IMAGES_DIR, num_images=10):
+    """Fetches exactly 5 unique HD nature images from Pexels/Pixabay and saves them to the desktop."""
+    os.makedirs(target_dir, exist_ok=True)
+    logging.info(f"Fetching {num_images} new HD nature images into {target_dir}...")
+
+    images_downloaded = 0
+    # Mix up queries and pages to ensure total uniqueness every run
+    queries = ["nature", "landscape", "mountains", "forest", "waterfall", "ocean", "wildlife", "sunset", "sky"]
+    query = random.choice(queries)
+    page_num = random.randint(1, 20) 
+
+    # 1. Try Pexels Image API first
+    if PEXELS_API_KEY:
+        search_url = f"https://api.pexels.com/v1/search"
+        headers = {"Authorization": PEXELS_API_KEY}
+        params = {"query": query, "per_page": 15, "page": page_num}
+        try:
+            resp = requests.get(search_url, headers=headers, params=params, timeout=12)
+            resp.raise_for_status()
+            photos = resp.json().get("photos", [])
+            random.shuffle(photos)
+            
+            for photo in photos:
+                if images_downloaded >= num_images:
+                    break
+                # Prefer high-resolution images
+                img_url = photo.get("src", {}).get("large2x") or photo.get("src", {}).get("original")
+                if img_url:
+                    unique_filename = f"pexels_nature_{int(time.time())}_{random.randint(1000,9999)}.jpg"
+                    filepath = os.path.join(target_dir, unique_filename)
+                    if _download_stream_to(filepath, img_url, headers=headers):
+                        images_downloaded += 1
+        except Exception as e:
+            logging.warning(f"Pexels image search failed: {e}")
+
+    # 2. Fallback to Pixabay if we still need more images
+    if images_downloaded < num_images and PIXABAY_API_KEY:
+        url = "https://pixabay.com/api/"
+        params = {
+            "key": PIXABAY_API_KEY,
+            "q": query,
+            "image_type": "photo",
+            "orientation": "horizontal",
+            "min_width": 1920,
+            "page": random.randint(1, 10),
+            "per_page": 20
+        }
+        try:
+            resp = requests.get(url, params=params, timeout=12)
+            resp.raise_for_status()
+            hits = resp.json().get("hits", [])
+            random.shuffle(hits)
+
+            for hit in hits:
+                if images_downloaded >= num_images:
+                    break
+                img_url = hit.get("largeImageURL")
+                if img_url:
+                    unique_filename = f"pixabay_nature_{int(time.time())}_{random.randint(1000,9999)}.jpg"
+                    filepath = os.path.join(target_dir, unique_filename)
+                    if _download_stream_to(filepath, img_url):
+                        images_downloaded += 1
+        except Exception as e:
+            logging.warning(f"Pixabay image search failed: {e}")
+
+    if images_downloaded > 0:
+        logging.info(f"Successfully saved {images_downloaded} unique HD images to {target_dir}")
+    else:
+        logging.warning("Could not fetch the HD nature images (Check your API keys/internet connection).")
+
+# =========================================================================
+# ENHANCEMENT: Fetch 5 unique Botanical Illustration/Vector images per run
+# =========================================================================
+def fetch_hd_nature_images2(target_dir=r"C:\Users\Jeremy\Desktop\Nature_Illustrations", num_images=5):
+    """Fetches unique botanical/floral background illustrations and vectors from Pexels/Pixabay."""
+    os.makedirs(target_dir, exist_ok=True)
+    logging.info(f"Fetching {num_images} new background illustrations into {target_dir}...")
+
+    images_downloaded = 0
+    # Queries targeted specifically at floral/botanical background designs
+    queries = [
+        "background", "floral background", "botanical background", 
+        "flower background", "nature background", "abstract background"
+    ]
+    query = random.choice(queries)
+    page_num = random.randint(1, 10) 
+
+    # Try Pexels Image API first
+    if PEXELS_API_KEY:
+        search_url = f"https://api.pexels.com/v1/search"
+        headers = {"Authorization": PEXELS_API_KEY}
+        params = {"query": f"{query} illustration", "per_page": 15, "page": page_num}
+        try:
+            resp = requests.get(search_url, headers=headers, params=params, timeout=12)
+            resp.raise_for_status()
+            photos = resp.json().get("photos", [])
+            random.shuffle(photos)
+            
+            for photo in photos:
+                if images_downloaded >= num_images:
+                    break
+                img_url = photo.get("src", {}).get("large2x") or photo.get("src", {}).get("original")
+                if img_url:
+                    unique_filename = f"pexels_floral_{int(time.time())}_{random.randint(1000,9999)}.jpg"
+                    filepath = os.path.join(target_dir, unique_filename)
+                    if _download_stream_to(filepath, img_url, headers=headers):
+                        images_downloaded += 1
+        except Exception as e:
+            logging.warning(f"Pexels image search failed: {e}")
+
+    # Pixabay API Search (Matches pixabay.com/illustrations/search/background/ and pixabay.com/vectors/search/background/)
+    if images_downloaded < num_images and PIXABAY_API_KEY:
+        # Dynamically toggle between 'illustration' and 'vector' image types
+        image_type = random.choice(["illustration", "vector"])
+        url = "https://pixabay.com/api/"
+        params = {
+            "key": PIXABAY_API_KEY,
+            "q": query,
+            "image_type": image_type,  # 'illustration' or 'vector'
+            "orientation": "horizontal",
+            "min_width": 1920,
+            "page": random.randint(1, 5),
+            "per_page": 20
+        }
+        try:
+            logging.info(f"Querying Pixabay API (q='{query}', image_type='{image_type}')...")
+            resp = requests.get(url, params=params, timeout=12)
+            resp.raise_for_status()
+            hits = resp.json().get("hits", [])
+            random.shuffle(hits)
+
+            for hit in hits:
+                if images_downloaded >= num_images:
+                    break
+                img_url = hit.get("largeImageURL")
+                if img_url:
+                    unique_filename = f"pixabay_{image_type}_{int(time.time())}_{random.randint(1000,9999)}.jpg"
+                    filepath = os.path.join(target_dir, unique_filename)
+                    if _download_stream_to(filepath, img_url):
+                        images_downloaded += 1
+        except Exception as e:
+            logging.warning(f"Pixabay image search failed: {e}")
+
+    if images_downloaded > 0:
+        logging.info(f"Successfully saved {images_downloaded} unique illustrations to {target_dir}")
+    else:
+        logging.warning("Could not fetch the illustrations (Check your API keys/internet connection).")
+        
+# =========================================================================
+
 def fetch_pexels_video(query="nature", per_page=15):
     if not PEXELS_API_KEY:
-        logging.case("PEXELS_API_KEY not set; skipping Pexels fetch.")
+        logging.info("PEXELS_API_KEY not set; skipping Pexels fetch.")
         return None
     search_url = "https://api.pexels.com/videos/search"
     headers = {"Authorization": PEXELS_API_KEY}
@@ -484,6 +640,11 @@ def create_quote_mobjects(quote_text, quote_author, frame_width, frame_height):
 
 class AnimatedQuoteWithBackground(Scene):
     def construct(self):
+        
+        # 1. Run the new image fetcher right at the beginning of the scene
+        fetch_hd_nature_images(num_images=10)
+        fetch_hd_nature_images2(num_images=5)
+
         total_duration = 7
 
         def _remove_path_safe(path):

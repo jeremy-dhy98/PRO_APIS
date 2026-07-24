@@ -24,7 +24,7 @@ voice_api_key = os.environ.get("VOICE_RSS_API_KEY", "").strip() or None
 PEXELS_API_KEY = os.environ.get("PEXELS_API_KEY", "").strip() or None
 PIXABAY_API_KEY = os.environ.get("PIXABAY_API_KEY", "").strip() or None
 
-# Global variables (no longer used for caching, but kept for structure)
+# Global variables
 quote_data = None
 voiceover_file = None
 _voiceover_cached_quote = None
@@ -33,6 +33,10 @@ _voiceover_cached_quote = None
 # PATH RESOLUTIONS & PERFORMANCE ENVIRONMENT CONFIGURATION
 # ==========================================================
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+# Target directory updated for Botanical Illustrations
+NATURE_DIR = r"C:\Users\Jeremy\Desktop\Nature"
+NATURE_HISTORY_FILE = os.path.join(NATURE_DIR, "downloaded_images.json")
 
 # Default filenames
 VIDEO_FILENAME = "46026-447087782_medium.mp4"
@@ -53,20 +57,18 @@ BG_SOUNDS_DIR = os.path.join(BASE_DIR, "bg_sounds")
 os.makedirs(BG_VIDEOS_DIR, exist_ok=True)
 os.makedirs(BG_SOUNDS_DIR, exist_ok=True)
 os.makedirs(FRAMES_DIR, exist_ok=True)
+os.makedirs(NATURE_DIR, exist_ok=True)
 
 # ─── CRITICAL WINDOWS FFmpeg & FFPROBE PATH RESOLUTION ───
 try:
     FFMPEG_EXE = imageio_ffmpeg.get_ffmpeg_exe()
     FFMPEG_DIR = os.path.dirname(FFMPEG_EXE)
     
-    # Inject directory into front of system PATH for internal sub-processes and where lookups
     os.environ["PATH"] = FFMPEG_DIR + os.pathsep + os.environ.get("PATH", "")
     os.environ["IMAGEIO_FFMPEG_EXE"] = FFMPEG_EXE
     
-    # Map configuration directly into pydub
     AudioSegment.converter = FFMPEG_EXE
     
-    # Explicitly map ffprobe location inside imageio binaries for Windows systems
     ffprobe_name = "ffprobe.exe" if os.name == "nt" else "ffprobe"
     FFPROBE_EXE = os.path.join(FFMPEG_DIR, ffprobe_name)
     
@@ -74,7 +76,6 @@ try:
         AudioSegment.ffprobe = FFPROBE_EXE
         logging.info(f"Using FFmpeg and FFprobe binaries via imageio: {FFMPEG_DIR}")
     else:
-        # Fallback to general binary string map if sister executable name differs
         AudioSegment.ffprobe = FFMPEG_EXE
         logging.warning("FFmpeg binary found, but specific ffprobe name was missing. Falling back to primary executable pointer.")
 except Exception as e:
@@ -122,14 +123,12 @@ def extract_video_frames(video_file, fps=30):
     except Exception:
         video_mtime = None
 
-    # Clear cached metadata files
     try:
         if os.path.exists(METADATA_PATH):
             os.remove(METADATA_PATH)
     except Exception:
         pass
 
-    # Clear existing .png files inside frames folder
     for fname in os.listdir(output_dir):
         if fname.endswith(".png"):
             try:
@@ -162,7 +161,6 @@ def get_audio_duration(audio_file):
         logging.warning(f"get_audio_duration: file not found: {audio_file}")
         return None
     try:
-         # Safely utilizes updated system variables configured globally
         audio = AudioSegment.from_file(audio_file)
         return len(audio) / 1000.0
     except Exception as e:
@@ -240,17 +238,14 @@ def trim_audio(audio_file, max_duration=30):
         logging.error(f"Failed exporting trimmed audio file structure: {e}")
         return _create_silent_audio(max_duration, out_path=trimmed_path)
 
-# ─── FIX: ENHANCED INTERNET WRAPPER & PREMIUM FALLBACKS FOR QUOTES ───
 def fetch_quote(max_attempts=3, timeout=8):
     global quote_data
     url = "https://zenquotes.io/api/random"
     
-    # Standard desktop user-agent to bypass connection drops or blocks targeting basic automation clients
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
     }
 
-    # Backup strategy arrays
     local_fallbacks = [
         {"quote": "The only way to do great work is to love what you do.", "author": "Steve Jobs"},
         {"quote": "Code is like humor. When you have to explain it, it’s bad.", "author": "Cory House"},
@@ -305,7 +300,6 @@ def fetch_quote(max_attempts=3, timeout=8):
             logging.error(f"Unexpected system tracking exception catch inside fetch_quote loop: {e}")
             break
 
-    # High quality local fallback configuration assigned on failure 
     result = random.choice(local_fallbacks)
     quote_data = result
     logging.info(f"Using high quality local backup quote module: {quote_data}")
@@ -315,7 +309,6 @@ def fetch_voiceover(quote, api_key):
     """Fetches voiceover for the given quote using VoiceRSS API."""
     global voiceover_file, _voiceover_cached_quote
 
-    # Clean old target structures on disk
     if voiceover_file and os.path.exists(voiceover_file):
         try:
             os.remove(voiceover_file)
@@ -425,6 +418,126 @@ def _download_stream_to(path, url, headers=None, timeout=30):
             pass
         return False
 
+# ==========================================================
+# ENHANCED FEATURE: FETCH BOTANICAL ILLUSTRATIONS 
+# Includes Fix for "No unique candidate" Error
+# ==========================================================
+def _load_downloaded_image_history():
+    """Reads previously saved image IDs to guarantee unique downloads on every run."""
+    if os.path.exists(NATURE_HISTORY_FILE):
+        try:
+            with open(NATURE_HISTORY_FILE, "r", encoding="utf-8") as f:
+                return set(json.load(f))
+        except Exception as e:
+            logging.warning(f"Failed loading downloaded image history log: {e}")
+    return set()
+
+def _save_downloaded_image_history(history_set):
+    """Saves updated download history log."""
+    try:
+        with open(NATURE_HISTORY_FILE, "w", encoding="utf-8") as f:
+            json.dump(list(history_set), f, indent=2)
+    except Exception as e:
+        logging.warning(f"Failed writing image history log: {e}")
+
+def fetch_and_save_hd_images(target_count=5):
+    """
+    Fetches `target_count` unique Botanical Illustrations from Pexels or Pixabay.
+    Includes safeguards against API history exhaustion.
+    """
+    logging.info(f"Initiating Botanical Image Fetcher (Target: {target_count} -> {NATURE_DIR})")
+    os.makedirs(NATURE_DIR, exist_ok=True)
+    
+    history = _load_downloaded_image_history()
+    raw_candidates = []
+    
+    # Extensive Botanical Queries to prevent history exhaustion
+    queries = [
+        "botanical vector", "flower pattern", 
+        "abstract leaves", "floral background", 
+        "nature background", 
+        "boho floral", "watercolor background"
+    ]
+    query = random.choice(queries)
+    random_page = random.randint(1, 10)
+
+    # 1. Query Pexels Photos API
+    if PEXELS_API_KEY:
+        url = "https://api.pexels.com/v1/search"
+        headers = {"Authorization": PEXELS_API_KEY}
+        params = {"query": query, "per_page": 40, "page": random_page, "orientation": "landscape"}
+        try:
+            resp = requests.get(url, headers=headers, params=params, timeout=10)
+            if resp.status_code == 200:
+                photos = resp.json().get("photos", [])
+                for p in photos:
+                    img_id = f"pexels_img_{p['id']}"
+                    src = p.get("src", {})
+                    img_url = src.get("large2x") or src.get("original")
+                    if img_url:
+                        raw_candidates.append((img_id, img_url))
+        except Exception as e:
+            logging.warning(f"Failed fetching photos from Pexels: {e}")
+
+    # 2. Query Pixabay Images API (Set to Illustration/Vector exclusively)
+    if PIXABAY_API_KEY:
+        url = "https://pixabay.com/api/"
+        params = {
+            "key": PIXABAY_API_KEY,
+            "q": query,
+            "image_type": "illustration", # Explicitly request artwork instead of realistic photos
+            "orientation": "horizontal",
+            "min_width": 1920,
+            "per_page": 40,
+            "page": random_page
+        }
+        try:
+            resp = requests.get(url, params=params, timeout=10)
+            if resp.status_code == 200:
+                hits = resp.json().get("hits", [])
+                for h in hits:
+                    img_id = f"pixabay_img_{h['id']}"
+                    img_url = h.get("largeImageURL") or h.get("fullHDURL") or h.get("imageURL")
+                    if img_url:
+                        raw_candidates.append((img_id, img_url))
+        except Exception as e:
+            logging.warning(f"Failed fetching photos from Pixabay: {e}")
+
+    # FIX FOR THE WARNING: Check if API actually returned data
+    if not raw_candidates:
+        logging.error("APIs returned ZERO images. Your API keys may be invalid or you have hit a rate limit.")
+        return 0
+
+    # Filter candidates against history log
+    candidates = [c for c in raw_candidates if c[0] not in history]
+
+    # FIX FOR THE WARNING: If history blocked all new images, reset history rather than failing
+    if not candidates and raw_candidates:
+        logging.warning("All fetched images were already in history! Clearing history to prevent exhaustion.")
+        history.clear()
+        candidates = raw_candidates
+
+    random.shuffle(candidates)
+    saved_count = 0
+
+    for img_id, img_url in candidates:
+        if saved_count >= target_count:
+            break
+
+        timestamp = int(time.time())
+        filename = f"{img_id}_{timestamp}.jpg"
+        filepath = os.path.join(NATURE_DIR, filename)
+
+        logging.info(f"Downloading Botanical Illustration ({saved_count + 1}/{target_count}): {img_url}")
+        if _download_stream_to(filepath, img_url):
+            history.add(img_id)
+            saved_count += 1
+
+    _save_downloaded_image_history(history)
+    logging.info(f"Done! Successfully saved {saved_count} new unique illustrations to: {NATURE_DIR}")
+    return saved_count
+
+
 def fetch_pexels_video(query="nature", per_page=15):
     """Fetch a random short video from Pexels matching `query`."""
     if not PEXELS_API_KEY:
@@ -531,6 +644,12 @@ class AnimatedQuoteWithBackground(Scene):
     def construct(self):
         total_duration = 7
 
+        # ── Trigger 5 HD Botanical Image Download Enhancement ──
+        try:
+            fetch_and_save_hd_images(target_count=5)
+        except Exception as e:
+            logging.warning(f"HD desktop image fetch step failed: {e}")
+
         def _remove_path_safe(path):
             try:
                 if os.path.islink(path) or os.path.isfile(path):
@@ -571,7 +690,6 @@ class AnimatedQuoteWithBackground(Scene):
         measured_voice_dur = None
         if audio and os.path.exists(audio):
             try:
-                # Utilizes global paths assigned natively inside the script environment matrix configuration layout
                 measured_voice_dur = AudioSegment.from_file(audio).duration_seconds
                 logging.info(f"Measured voiceover duration tracking logic output: {measured_voice_dur:.2f}s")
             except Exception as e:
@@ -620,7 +738,6 @@ class AnimatedQuoteWithBackground(Scene):
                 for img in video_frames[:150] 
             ]
 
-        # Use set_z_index and self.add() to ensure background stays behind text elements
         if bg_pool:
             bg_container = bg_pool[0].copy()
             bg_container.set_z_index(-10) 
