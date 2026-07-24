@@ -537,6 +537,116 @@ def fetch_and_save_hd_images(target_count=5):
     logging.info(f"Done! Successfully saved {saved_count} new unique illustrations to: {NATURE_DIR}")
     return saved_count
 
+def fetch_nature_video(
+    target_dir: str = r"C:\Users\Jeremy\Desktop\Nature",
+    min_duration: int = 45,
+    max_duration: int = 90,
+    max_attempts: int = 10
+) -> str | None:
+    """
+    Fetches a single video matching nature categories with a duration between
+    45s and 90s, saving it to the specified target media directory.
+    
+    Returns the file path of the downloaded video, or None if download fails.
+    """
+    os.makedirs(target_dir, exist_ok=True)
+    logging.info(f"Searching for a video ({min_duration}s–{max_duration}s) in {target_dir}...")
+
+    # Shuffle categories to keep downloads diverse across runs
+    shuffled_queries = NATURE_CATEGORIES.copy()
+    random.shuffle(shuffled_queries)
+
+    # ------------------------------------------------------------------
+    # Strategy 1: Pexels Video API Search
+    # ------------------------------------------------------------------
+    if PEXELS_API_KEY:
+        for query in shuffled_queries[:max_attempts]:
+            page_num = random.randint(1, 5)
+            url = "https://api.pexels.com/videos/search"
+            headers = {"Authorization": PEXELS_API_KEY}
+            params = {
+                "query": query,
+                "per_page": 20,
+                "page": page_num,
+                "orientation": "portrait"  # Ideal for IG Reels/FB Stories; change or remove if landscape preferred
+            }
+
+            try:
+                resp = requests.get(url, headers=headers, params=params, timeout=12)
+                resp.raise_for_status()
+                videos = resp.json().get("videos", [])
+                random.shuffle(videos)
+
+                for vid in videos:
+                    duration = vid.get("duration", 0)
+                    
+                    # Strictly enforce duration window (45s to 90s)
+                    if min_duration <= duration <= max_duration:
+                        video_files = vid.get("video_files", [])
+                        
+                        # Select highest quality MP4 link (preferably HD 1080p or 720p)
+                        best_file = next(
+                            (vf for vf in video_files if vf.get("quality") == "hd" and vf.get("file_type") == "video/mp4"),
+                            video_files[0] if video_files else None
+                        )
+
+                        if best_file and best_file.get("link"):
+                            download_url = best_file["link"]
+                            filename = f"pexels_{query}_{int(time.time())}_{random.randint(1000, 9999)}.mp4"
+                            filepath = os.path.join(target_dir, filename)
+
+                            logging.info(f"Found Pexels video ('{query}', {duration}s). Downloading to {filepath}...")
+                            
+                            if _download_stream_to(filepath, download_url, headers=headers):
+                                return filepath
+
+            except Exception as e:
+                logging.warning(f"Pexels video fetch attempt for query '{query}' failed: {e}")
+
+    # ------------------------------------------------------------------
+    # Strategy 2: Pixabay Video API Fallback
+    # ------------------------------------------------------------------
+    if PIXABAY_API_KEY:
+        for query in shuffled_queries[:max_attempts]:
+            url = "https://pixabay.com/api/videos/"
+            params = {
+                "key": PIXABAY_API_KEY,
+                "q": query,
+                "per_page": 20,
+                "page": random.randint(1, 3)
+            }
+
+            try:
+                resp = requests.get(url, params=params, timeout=12)
+                resp.raise_for_status()
+                hits = resp.json().get("hits", [])
+                random.shuffle(hits)
+
+                for hit in hits:
+                    duration = hit.get("duration", 0)
+                    
+                    # Strictly enforce duration window (45s to 90s)
+                    if min_duration <= duration <= max_duration:
+                        videos_data = hit.get("videos", {})
+                        # Prefer large/medium MP4 URL
+                        video_info = videos_data.get("large") or videos_data.get("medium") or videos_data.get("small")
+                        
+                        if video_info and video_info.get("url"):
+                            download_url = video_info["url"]
+                            filename = f"pixabay_{query}_{int(time.time())}_{random.randint(1000, 9999)}.mp4"
+                            filepath = os.path.join(target_dir, filename)
+
+                            logging.info(f"Found Pixabay video ('{query}', {duration}s). Downloading to {filepath}...")
+                            
+                            if _download_stream_to(filepath, download_url):
+                                return filepath
+
+            except Exception as e:
+                logging.warning(f"Pixabay video fetch attempt for query '{query}' failed: {e}")
+
+    logging.error(f"Failed to find any videos matching duration criteria ({min_duration}s–{max_duration}s).")
+    return None
+
 
 def fetch_pexels_video(query="nature", per_page=15):
     """Fetch a random short video from Pexels matching `query`."""
@@ -647,6 +757,7 @@ class AnimatedQuoteWithBackground(Scene):
         # ── Trigger 5 HD Botanical Image Download Enhancement ──
         try:
             fetch_and_save_hd_images(target_count=5)
+            fetch_nature_video()
         except Exception as e:
             logging.warning(f"HD desktop image fetch step failed: {e}")
 
