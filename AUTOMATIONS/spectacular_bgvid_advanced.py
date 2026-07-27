@@ -442,8 +442,8 @@ def _save_downloaded_image_history(history_set):
 
 def fetch_and_save_hd_images(target_count=5):
     """
-    Fetches `target_count` unique Botanical Illustrations from Pexels or Pixabay.
-    Includes safeguards against API history exhaustion.
+    Fetches `target_count` unique, top-rated Botanical Illustrations from Pexels or Pixabay.
+    Includes safeguards against API history exhaustion while prioritizing popular results.
     """
     logging.info(f"Initiating Botanical Image Fetcher (Target: {target_count} -> {NATURE_DIR})")
     os.makedirs(NATURE_DIR, exist_ok=True)
@@ -451,75 +451,87 @@ def fetch_and_save_hd_images(target_count=5):
     history = _load_downloaded_image_history()
     raw_candidates = []
     
-    # Extensive Botanical Queries to prevent history exhaustion
+    # Extensive Botanical Queries
     queries = [
         "botanical vector", "flower pattern", 
         "abstract leaves", "floral background", 
         "nature background", 
         "boho floral", "watercolor background"
     ]
-    query = random.choice(queries)
-    random_page = random.randint(1, 10)
+    
+    # Shuffle queries so every run searches different topics first, but always pulls top-ranked Page 1 results
+    random.shuffle(queries)
 
-    # 1. Query Pexels Photos API
-    if PEXELS_API_KEY:
-        url = "https://api.pexels.com/v1/search"
-        headers = {"Authorization": PEXELS_API_KEY}
-        params = {"query": query, "per_page": 40, "page": random_page, "orientation": "landscape"}
-        try:
-            resp = requests.get(url, headers=headers, params=params, timeout=10)
-            if resp.status_code == 200:
-                photos = resp.json().get("photos", [])
-                for p in photos:
-                    img_id = f"pexels_img_{p['id']}"
-                    src = p.get("src", {})
-                    img_url = src.get("large2x") or src.get("original")
-                    if img_url:
-                        raw_candidates.append((img_id, img_url))
-        except Exception as e:
-            logging.warning(f"Failed fetching photos from Pexels: {e}")
+    for query in queries:
+        # Stop querying APIs if we have gathered enough top candidates
+        if len(raw_candidates) >= target_count * 5:
+            break
 
-    # 2. Query Pixabay Images API (Set to Illustration/Vector exclusively)
-    if PIXABAY_API_KEY:
-        url = "https://pixabay.com/api/"
-        params = {
-            "key": PIXABAY_API_KEY,
-            "q": query,
-            "image_type": "illustration", # Explicitly request artwork instead of realistic photos
-            "orientation": "horizontal",
-            "min_width": 1920,
-            "per_page": 40,
-            "page": random_page
-        }
-        try:
-            resp = requests.get(url, params=params, timeout=10)
-            if resp.status_code == 200:
-                hits = resp.json().get("hits", [])
-                for h in hits:
-                    img_id = f"pixabay_img_{h['id']}"
-                    img_url = h.get("largeImageURL") or h.get("fullHDURL") or h.get("imageURL")
-                    if img_url:
-                        raw_candidates.append((img_id, img_url))
-        except Exception as e:
-            logging.warning(f"Failed fetching photos from Pixabay: {e}")
+        # 1. Query Pexels Photos API (Page 1 holds the most popular/relevant images)
+        if PEXELS_API_KEY:
+            url = "https://api.pexels.com/v1/search"
+            headers = {"Authorization": PEXELS_API_KEY}
+            params = {
+                "query": query, 
+                "per_page": 15, 
+                "page": 1,  # Page 1 yields top-ranked results
+                "orientation": "landscape"
+            }
+            try:
+                resp = requests.get(url, headers=headers, params=params, timeout=10)
+                if resp.status_code == 200:
+                    photos = resp.json().get("photos", [])
+                    for p in photos:
+                        img_id = f"pexels_img_{p['id']}"
+                        src = p.get("src", {})
+                        img_url = src.get("large2x") or src.get("original")
+                        if img_url:
+                            raw_candidates.append((img_id, img_url))
+            except Exception as e:
+                logging.warning(f"Failed fetching photos from Pexels for '{query}': {e}")
 
-    # FIX FOR THE WARNING: Check if API actually returned data
+        # 2. Query Pixabay Images API (Explicitly set order to popular on Page 1)
+        if PIXABAY_API_KEY:
+            url = "https://pixabay.com/api/"
+            params = {
+                "key": PIXABAY_API_KEY,
+                "q": query,
+                "image_type": "illustration",
+                "orientation": "horizontal",
+                "order": "popular",  # Explicitly demand most popular items
+                "min_width": 1920,
+                "per_page": 15,
+                "page": 1  # Page 1 yields top-ranked results
+            }
+            try:
+                resp = requests.get(url, params=params, timeout=10)
+                if resp.status_code == 200:
+                    hits = resp.json().get("hits", [])
+                    for h in hits:
+                        img_id = f"pixabay_img_{h['id']}"
+                        img_url = h.get("largeImageURL") or h.get("fullHDURL") or h.get("imageURL")
+                        if img_url:
+                            raw_candidates.append((img_id, img_url))
+            except Exception as e:
+                logging.warning(f"Failed fetching photos from Pixabay for '{query}': {e}")
+
+    # Check if API actually returned data
     if not raw_candidates:
         logging.error("APIs returned ZERO images. Your API keys may be invalid or you have hit a rate limit.")
         return 0
 
-    # Filter candidates against history log
+    # Filter candidates against history log (maintaining original popular ranking)
     candidates = [c for c in raw_candidates if c[0] not in history]
 
-    # FIX FOR THE WARNING: If history blocked all new images, reset history rather than failing
+    # Safeguard: If history blocked all top images, clear history to prevent failure
     if not candidates and raw_candidates:
-        logging.warning("All fetched images were already in history! Clearing history to prevent exhaustion.")
+        logging.warning("All fetched popular images were already in history! Clearing history to reset pool.")
         history.clear()
         candidates = raw_candidates
 
-    random.shuffle(candidates)
     saved_count = 0
 
+    # Process candidates in order of popularity (No random.shuffle)
     for img_id, img_url in candidates:
         if saved_count >= target_count:
             break
@@ -528,20 +540,36 @@ def fetch_and_save_hd_images(target_count=5):
         filename = f"{img_id}_{timestamp}.jpg"
         filepath = os.path.join(NATURE_DIR, filename)
 
-        logging.info(f"Downloading Botanical Illustration ({saved_count + 1}/{target_count}): {img_url}")
+        logging.info(f"Downloading Popular Botanical Illustration ({saved_count + 1}/{target_count}): {img_url}")
         if _download_stream_to(filepath, img_url):
             history.add(img_id)
             saved_count += 1
 
     _save_downloaded_image_history(history)
-    logging.info(f"Done! Successfully saved {saved_count} new unique illustrations to: {NATURE_DIR}")
+    logging.info(f"Done! Successfully saved {saved_count} new unique popular illustrations to: {NATURE_DIR}")
     return saved_count
-
+    
 # Categories list 
 NATURE_CATEGORIES = [
     "nature", "landscape", "mountains", "forest", 
-    "waterfall", "ocean", "wildlife", "sunset", "sky"
+    "waterfall", "ocean", "wildlife", "sunset", "birds"
 ]
+
+def _load_video_history(history_file: str) -> set:
+    if os.path.exists(history_file):
+        try:
+            with open(history_file, "r") as f:
+                return set(json.load(f))
+        except Exception as e:
+            logging.warning(f"Could not load video history: {e}")
+    return set()
+
+def _save_video_history(history_file: str, history_set: set):
+    try:
+        with open(history_file, "w") as f:
+            json.dump(list(history_set), f, indent=2)
+    except Exception as e:
+        logging.warning(f"Could not save video history: {e}")
 
 def fetch_nature_video(
     target_dir: str = r"C:\Users\Jeremy\Desktop\Nature",
@@ -550,110 +578,123 @@ def fetch_nature_video(
     max_attempts: int = 10
 ) -> str | None:
     """
-    Fetches a single video matching nature categories with a duration between
-    45s and 90s, saving it to the specified target media directory.
+    Fetches the most popular video matching nature categories with a duration
+    between min_duration and max_duration, ensuring no duplicate downloads across runs.
     
     Returns the file path of the downloaded video, or None if download fails.
     """
     os.makedirs(target_dir, exist_ok=True)
-    logging.info(f"Searching for a video ({min_duration}s–{max_duration}s) in {target_dir}...")
+    history_file = os.path.join(target_dir, "downloaded_video_history.json")
+    history = _load_video_history(history_file)
 
-    # Shuffle categories to keep downloads diverse across runs
+    logging.info(f"Searching for a new popular video ({min_duration}s–{max_duration}s) in {target_dir}...")
+
     shuffled_queries = NATURE_CATEGORIES.copy()
     random.shuffle(shuffled_queries)
 
     # ------------------------------------------------------------------
-    # Strategy 1: Pexels Video API Search
+    # Strategy 1: Pexels Video API Search (Ranked by Popularity/Relevance)
     # ------------------------------------------------------------------
     if PEXELS_API_KEY:
         for query in shuffled_queries[:max_attempts]:
-            page_num = random.randint(1, 5)
             url = "https://api.pexels.com/videos/search"
             headers = {"Authorization": PEXELS_API_KEY}
-            params = {
-                "query": query,
-                "per_page": 20,
-                "page": page_num,
-                "orientation": "portrait"  # Ideal for IG Reels/FB Stories; change or remove if landscape preferred
-            }
+            
+            # Start on Page 1 for top popularity; check Page 2 if duration filter skips all Page 1 videos
+            for page_num in [1, 2]:
+                params = {
+                    "query": query,
+                    "per_page": 20,
+                    "page": page_num,
+                    "orientation": "portrait"  # Ideal for IG Reels / FB Stories / TikTok
+                }
 
-            try:
-                resp = requests.get(url, headers=headers, params=params, timeout=12)
-                resp.raise_for_status()
-                videos = resp.json().get("videos", [])
-                random.shuffle(videos)
+                try:
+                    resp = requests.get(url, headers=headers, params=params, timeout=12)
+                    resp.raise_for_status()
+                    videos = resp.json().get("videos", [])
 
-                for vid in videos:
-                    duration = vid.get("duration", 0)
-                    
-                    # Strictly enforce duration window (45s to 90s)
-                    if min_duration <= duration <= max_duration:
-                        video_files = vid.get("video_files", [])
-                        
-                        # Select highest quality MP4 link (preferably HD 1080p or 720p)
-                        best_file = next(
-                            (vf for vf in video_files if vf.get("quality") == "hd" and vf.get("file_type") == "video/mp4"),
-                            video_files[0] if video_files else None
-                        )
+                    # Iterate in API rank order (highest quality/popularity first)
+                    for vid in videos:
+                        vid_id = f"pexels_vid_{vid.get('id')}"
+                        if vid_id in history:
+                            continue
 
-                        if best_file and best_file.get("link"):
-                            download_url = best_file["link"]
-                            filename = f"pexels_{query}_{int(time.time())}_{random.randint(1000, 9999)}.mp4"
-                            filepath = os.path.join(target_dir, filename)
-
-                            logging.info(f"Found Pexels video ('{query}', {duration}s). Downloading to {filepath}...")
+                        duration = vid.get("duration", 0)
+                        if min_duration <= duration <= max_duration:
+                            video_files = vid.get("video_files", [])
                             
-                            if _download_stream_to(filepath, download_url, headers=headers):
-                                return filepath
+                            # Select highest quality MP4 link (preferably HD)
+                            best_file = next(
+                                (vf for vf in video_files if vf.get("quality") == "hd" and vf.get("file_type") == "video/mp4"),
+                                video_files[0] if video_files else None
+                            )
 
-            except Exception as e:
-                logging.warning(f"Pexels video fetch attempt for query '{query}' failed: {e}")
+                            if best_file and best_file.get("link"):
+                                download_url = best_file["link"]
+                                filename = f"{vid_id}_{query}.mp4"
+                                filepath = os.path.join(target_dir, filename)
+
+                                logging.info(f"Found top Pexels video ('{query}', {duration}s, ID: {vid_id}). Downloading...")
+                                
+                                if _download_stream_to(filepath, download_url, headers=headers):
+                                    history.add(vid_id)
+                                    _save_video_history(history_file, history)
+                                    return filepath
+
+                except Exception as e:
+                    logging.warning(f"Pexels video fetch attempt for query '{query}' page {page_num} failed: {e}")
 
     # ------------------------------------------------------------------
-    # Strategy 2: Pixabay Video API Fallback
+    # Strategy 2: Pixabay Video API Fallback (Explicitly Ordered by Popularity)
     # ------------------------------------------------------------------
     if PIXABAY_API_KEY:
         for query in shuffled_queries[:max_attempts]:
             url = "https://pixabay.com/api/videos/"
-            params = {
-                "key": PIXABAY_API_KEY,
-                "q": query,
-                "per_page": 20,
-                "page": random.randint(1, 3)
-            }
+            
+            for page_num in [1, 2]:
+                params = {
+                    "key": PIXABAY_API_KEY,
+                    "q": query,
+                    "order": "popular",  # Explicitly demand most popular videos
+                    "per_page": 20,
+                    "page": page_num
+                }
 
-            try:
-                resp = requests.get(url, params=params, timeout=12)
-                resp.raise_for_status()
-                hits = resp.json().get("hits", [])
-                random.shuffle(hits)
+                try:
+                    resp = requests.get(url, params=params, timeout=12)
+                    resp.raise_for_status()
+                    hits = resp.json().get("hits", [])
 
-                for hit in hits:
-                    duration = hit.get("duration", 0)
-                    
-                    # Strictly enforce duration window (45s to 90s)
-                    if min_duration <= duration <= max_duration:
-                        videos_data = hit.get("videos", {})
-                        # Prefer large/medium MP4 URL
-                        video_info = videos_data.get("large") or videos_data.get("medium") or videos_data.get("small")
-                        
-                        if video_info and video_info.get("url"):
-                            download_url = video_info["url"]
-                            filename = f"pixabay_{query}_{int(time.time())}_{random.randint(1000, 9999)}.mp4"
-                            filepath = os.path.join(target_dir, filename)
+                    # Iterate in API rank order
+                    for hit in hits:
+                        vid_id = f"pixabay_vid_{hit.get('id')}"
+                        if vid_id in history:
+                            continue
 
-                            logging.info(f"Found Pixabay video ('{query}', {duration}s). Downloading to {filepath}...")
+                        duration = hit.get("duration", 0)
+                        if min_duration <= duration <= max_duration:
+                            videos_data = hit.get("videos", {})
+                            video_info = videos_data.get("large") or videos_data.get("medium") or videos_data.get("small")
                             
-                            if _download_stream_to(filepath, download_url):
-                                return filepath
+                            if video_info and video_info.get("url"):
+                                download_url = video_info["url"]
+                                filename = f"{vid_id}_{query}.mp4"
+                                filepath = os.path.join(target_dir, filename)
 
-            except Exception as e:
-                logging.warning(f"Pixabay video fetch attempt for query '{query}' failed: {e}")
+                                logging.info(f"Found top Pixabay video ('{query}', {duration}s, ID: {vid_id}). Downloading...")
+                                
+                                if _download_stream_to(filepath, download_url):
+                                    history.add(vid_id)
+                                    _save_video_history(history_file, history)
+                                    return filepath
 
-    logging.error(f"Failed to find any videos matching duration criteria ({min_duration}s–{max_duration}s).")
+                except Exception as e:
+                    logging.warning(f"Pixabay video fetch attempt for query '{query}' page {page_num} failed: {e}")
+
+    logging.error(f"Failed to find any new popular videos matching duration criteria ({min_duration}s–{max_duration}s).")
     return None
-
-
+    
 def fetch_pexels_video(query="nature", per_page=15):
     """Fetch a random short video from Pexels matching `query`."""
     if not PEXELS_API_KEY:
