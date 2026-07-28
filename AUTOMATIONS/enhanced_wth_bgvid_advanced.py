@@ -2,6 +2,7 @@ import time
 from manim import *
 import requests
 import logging
+import json
 import os
 import textwrap
 import subprocess
@@ -33,6 +34,8 @@ CAT_IMAGE_FILENAME = "cat_image.jpg"
 
 # Target directory for the 5 new HD Nature images
 NATURE_IMAGES_DIR = r"C:\Users\Jeremy\Desktop\Nature"
+history_file = os.path.join(NATURE_IMAGES_DIR,"downloaded_video_history.json")  
+
 
 os.makedirs(BG_VIDEOS_DIR, exist_ok=True)
 os.makedirs(BG_SOUNDS_DIR, exist_ok=True)

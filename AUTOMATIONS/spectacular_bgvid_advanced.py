@@ -37,6 +37,7 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 # Target directory updated for Botanical Illustrations
 NATURE_DIR = r"C:\Users\Jeremy\Desktop\Nature"
 NATURE_HISTORY_FILE = os.path.join(NATURE_DIR, "downloaded_images.json")
+history_file = os.path.join(NATURE_DIR,"downloaded_video_history.json")  
 
 # Default filenames
 VIDEO_FILENAME = "46026-447087782_medium.mp4"
@@ -557,20 +558,37 @@ NATURE_CATEGORIES = [
 
 def _load_video_history(history_file: str) -> set:
     if os.path.exists(history_file):
+        # Ignore 0-byte empty files and avoid JSONDecodeError
+        if os.path.getsize(history_file) == 0:
+            logging.warning(f"Video history file '{history_file}' is empty. Initializing new history.")
+            return set()
+        
         try:
-            with open(history_file, "r") as f:
-                return set(json.load(f))
+            with open(history_file, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                return set(data) if isinstance(data, list) else set()
+        except (json.JSONDecodeError, ValueError) as e:
+            logging.warning(f"Video history file is corrupted: {e}. Initializing new history.")
         except Exception as e:
             logging.warning(f"Could not load video history: {e}")
+            
     return set()
 
 def _save_video_history(history_file: str, history_set: set):
+    temp_file = f"{history_file}.tmp"
     try:
-        with open(history_file, "w") as f:
+        # Atomic write: Write to a temp file first, then atomically replace the target
+        with open(temp_file, "w", encoding="utf-8") as f:
             json.dump(list(history_set), f, indent=2)
+            
+        os.replace(temp_file, history_file)
     except Exception as e:
         logging.warning(f"Could not save video history: {e}")
-
+        if os.path.exists(temp_file):
+            try:
+                os.remove(temp_file)
+            except Exception:
+                pass
 def fetch_nature_video(
     target_dir: str = r"C:\Users\Jeremy\Desktop\Nature",
     min_duration: int = 45,
