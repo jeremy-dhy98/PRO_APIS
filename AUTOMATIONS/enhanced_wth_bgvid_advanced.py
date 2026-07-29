@@ -14,6 +14,7 @@ import shutil
 from PIL import Image
 import imageio_ffmpeg
 
+
 # Set up logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
@@ -109,8 +110,30 @@ def _download_stream_to(path, url, headers=None, timeout=30):
         return False
 
 # =========================================================================
-# NEW ENHANCEMENT: Fetch 5 unique HD Nature images per run
+# APOD & NATURE BLEND: Search Queries & Helper Configs
 # =========================================================================
+
+# Queries engineered to bridge deep-space/APOD aesthetics with terrestrial nature
+COSMIC_NATURE_QUERIES = [
+    "milky way landscape",
+    "aurora borealis nature",
+    "night sky mountains",
+    "astrophotography landscape",
+    "starry night lake",
+    "cosmic landscape",
+    "stargazing forest",
+    "celestial night sky",
+    "nebula horizon"
+]
+
+COSMIC_ILLUSTRATION_QUERIES = [
+    "celestial botanical",
+    "cosmic nature illustration",
+    "starry sky background",
+    "astronomy nature art",
+    "galaxy floral background",
+    "night sky vector"
+]
 
 # Helper functions for history tracking
 def _load_download_history(history_file):
@@ -129,21 +152,27 @@ def _save_download_history(history_file, history_set):
     except Exception as e:
         logging.warning(f"Could not save download history: {e}")
 
+
+# =========================================================================
+# 1. FETCH COSMIC NATURE HD IMAGES (APOD + Nature Blend)
+# =========================================================================
+
 def fetch_hd_nature_images(target_dir=NATURE_IMAGES_DIR, num_images=10):
-    """Fetches popular, unique HD nature images from Pexels/Pixabay without repeating past downloads."""
+    """
+    Fetches unique HD nature images that blend seamlessly with APOD space themes 
+    (Milky Way, Auroras, Night Skies, Astrophotography) to feed AI caption generators.
+    """
     os.makedirs(target_dir, exist_ok=True)
-    
-    # Persistent JSON history log inside target directory
     history_file = os.path.join(target_dir, "downloaded_history.json")
     downloaded_ids = _load_download_history(history_file)
 
-    logging.info(f"Fetching {num_images} new HD nature images into {target_dir}...")
+    logging.info(f"Fetching {num_images} APOD-blended HD cosmic nature images into {target_dir}...")
 
     images_downloaded = 0
-    queries = ["nature", "landscape", "mountains", "forest", "waterfall", "ocean", "wildlife", "sunset", "sky"]
-    random.shuffle(queries)  # Rotates search order while preserving top-ranking results
+    queries = COSMIC_NATURE_QUERIES.copy()
+    random.shuffle(queries)
 
-    # 1. Try Pexels Image API
+    # 1. Pexels API (Searches highest-ranked astrophotography & cosmic nature shots)
     if PEXELS_API_KEY and images_downloaded < num_images:
         search_url = "https://api.pexels.com/v1/search"
         headers = {"Authorization": PEXELS_API_KEY}
@@ -152,7 +181,6 @@ def fetch_hd_nature_images(target_dir=NATURE_IMAGES_DIR, num_images=10):
             if images_downloaded >= num_images:
                 break
             
-            # Page 1 holds the highest ranked/most popular images by default
             params = {"query": q, "per_page": 15, "page": 1}
             try:
                 resp = requests.get(search_url, headers=headers, params=params, timeout=12)
@@ -163,14 +191,15 @@ def fetch_hd_nature_images(target_dir=NATURE_IMAGES_DIR, num_images=10):
                     if images_downloaded >= num_images:
                         break
 
-                    # Unique photo key (e.g., pexels_123456)
-                    photo_id = f"pexels_{photo.get('id')}"
+                    photo_id = f"pexels_cosmic_{photo.get('id')}"
                     if photo_id in downloaded_ids:
                         continue
 
                     img_url = photo.get("src", {}).get("large2x") or photo.get("src", {}).get("original")
                     if img_url:
-                        filename = f"{photo_id}.jpg"
+                        # Retain query context in filename to assist AI caption pipelines if parsed
+                        safe_q = q.replace(" ", "_")
+                        filename = f"{photo_id}_{safe_q}.jpg"
                         filepath = os.path.join(target_dir, filename)
                         
                         if _download_stream_to(filepath, img_url, headers=headers):
@@ -179,7 +208,7 @@ def fetch_hd_nature_images(target_dir=NATURE_IMAGES_DIR, num_images=10):
             except Exception as e:
                 logging.warning(f"Pexels search failed for query '{q}': {e}")
 
-    # 2. Fallback to Pixabay if more images are needed
+    # 2. Pixabay API Fallback (Explicitly targeting high-resolution popular astrophotography)
     if images_downloaded < num_images and PIXABAY_API_KEY:
         url = "https://pixabay.com/api/"
         
@@ -192,9 +221,9 @@ def fetch_hd_nature_images(target_dir=NATURE_IMAGES_DIR, num_images=10):
                 "q": q,
                 "image_type": "photo",
                 "orientation": "horizontal",
-                "order": "popular",  # Explicitly request top popular images
+                "order": "popular",
                 "min_width": 1920,
-                "page": 1,           # Page 1 yields top results
+                "page": 1,
                 "per_page": 20
             }
             try:
@@ -206,14 +235,14 @@ def fetch_hd_nature_images(target_dir=NATURE_IMAGES_DIR, num_images=10):
                     if images_downloaded >= num_images:
                         break
 
-                    # Unique photo key (e.g., pixabay_987654)
-                    hit_id = f"pixabay_{hit.get('id')}"
+                    hit_id = f"pixabay_cosmic_{hit.get('id')}"
                     if hit_id in downloaded_ids:
                         continue
 
                     img_url = hit.get("largeImageURL")
                     if img_url:
-                        filename = f"{hit_id}.jpg"
+                        safe_q = q.replace(" ", "_")
+                        filename = f"{hit_id}_{safe_q}.jpg"
                         filepath = os.path.join(target_dir, filename)
                         
                         if _download_stream_to(filepath, img_url):
@@ -222,34 +251,30 @@ def fetch_hd_nature_images(target_dir=NATURE_IMAGES_DIR, num_images=10):
             except Exception as e:
                 logging.warning(f"Pixabay search failed for query '{q}': {e}")
 
-    # Save history back to file
     _save_download_history(history_file, downloaded_ids)
 
     if images_downloaded > 0:
-        logging.info(f"Successfully saved {images_downloaded} new unique HD images to {target_dir}")
+        logging.info(f"Successfully saved {images_downloaded} new cosmic/APOD-blended images to {target_dir}")
     else:
-        logging.warning("No new images downloaded (all top results may have already been downloaded previously).")
-        
+        logging.warning("No new images downloaded (top APOD-nature results may have already been retrieved).")
+
+
 # =========================================================================
-# ENHANCEMENT: Fetch 5 unique Botanical Illustration/Vector images per run
+# 2. FETCH CELESTIAL & BOTANICAL ILLUSTRATIONS / VECTORS
 # =========================================================================
+
 def fetch_hd_nature_images2(target_dir=r"C:\Users\Jeremy\Desktop\Nature_Illustrations", num_images=5):
-    """Fetches unique botanical/floral background illustrations and vectors from Pexels/Pixabay."""
+    """Fetches unique celestial, astronomy, and botanical background vectors/illustrations."""
     os.makedirs(target_dir, exist_ok=True)
-    logging.info(f"Fetching {num_images} new background illustrations into {target_dir}...")
+    logging.info(f"Fetching {num_images} new celestial/botanical background illustrations into {target_dir}...")
 
     images_downloaded = 0
-    # Queries targeted specifically at floral/botanical background designs
-    queries = [
-        "background", "floral background", "botanical background", 
-        "flower background", "nature background", "abstract background"
-    ]
-    query = random.choice(queries)
-    page_num = random.randint(1, 10) 
+    query = random.choice(COSMIC_ILLUSTRATION_QUERIES)
+    page_num = random.randint(1, 5) 
 
-    # Try Pexels Image API first
+    # Pexels API
     if PEXELS_API_KEY:
-        search_url = f"https://api.pexels.com/v1/search"
+        search_url = "https://api.pexels.com/v1/search"
         headers = {"Authorization": PEXELS_API_KEY}
         params = {"query": f"{query} illustration", "per_page": 15, "page": page_num}
         try:
@@ -263,29 +288,27 @@ def fetch_hd_nature_images2(target_dir=r"C:\Users\Jeremy\Desktop\Nature_Illustra
                     break
                 img_url = photo.get("src", {}).get("large2x") or photo.get("src", {}).get("original")
                 if img_url:
-                    unique_filename = f"pexels_floral_{int(time.time())}_{random.randint(1000,9999)}.jpg"
+                    unique_filename = f"pexels_celestial_{int(time.time())}_{random.randint(1000,9999)}.jpg"
                     filepath = os.path.join(target_dir, unique_filename)
                     if _download_stream_to(filepath, img_url, headers=headers):
                         images_downloaded += 1
         except Exception as e:
-            logging.warning(f"Pexels image search failed: {e}")
+            logging.warning(f"Pexels illustration search failed: {e}")
 
-    # Pixabay API Search (Matches pixabay.com/illustrations/search/background/ and pixabay.com/vectors/search/background/)
+    # Pixabay API Search
     if images_downloaded < num_images and PIXABAY_API_KEY:
-        # Dynamically toggle between 'illustration' and 'vector' image types
         image_type = random.choice(["illustration", "vector"])
         url = "https://pixabay.com/api/"
         params = {
             "key": PIXABAY_API_KEY,
             "q": query,
-            "image_type": image_type,  # 'illustration' or 'vector'
+            "image_type": image_type,
             "orientation": "horizontal",
             "min_width": 1920,
             "page": random.randint(1, 5),
             "per_page": 20
         }
         try:
-            logging.info(f"Querying Pixabay API (q='{query}', image_type='{image_type}')...")
             resp = requests.get(url, params=params, timeout=12)
             resp.raise_for_status()
             hits = resp.json().get("hits", [])
@@ -296,25 +319,22 @@ def fetch_hd_nature_images2(target_dir=r"C:\Users\Jeremy\Desktop\Nature_Illustra
                     break
                 img_url = hit.get("largeImageURL")
                 if img_url:
-                    unique_filename = f"pixabay_{image_type}_{int(time.time())}_{random.randint(1000,9999)}.jpg"
+                    unique_filename = f"pixabay_celestial_{image_type}_{int(time.time())}_{random.randint(1000,9999)}.jpg"
                     filepath = os.path.join(target_dir, unique_filename)
                     if _download_stream_to(filepath, img_url):
                         images_downloaded += 1
         except Exception as e:
-            logging.warning(f"Pixabay image search failed: {e}")
+            logging.warning(f"Pixabay illustration search failed: {e}")
 
     if images_downloaded > 0:
-        logging.info(f"Successfully saved {images_downloaded} unique illustrations to {target_dir}")
+        logging.info(f"Successfully saved {images_downloaded} celestial/botanical illustrations to {target_dir}")
     else:
-        logging.warning("Could not fetch the illustrations (Check your API keys/internet connection).")
+        logging.warning("Could not fetch illustrations.")
 
 
-# Categories list 
-NATURE_CATEGORIES = [
-    "nature", "landscape", "mountains", "forest", 
-    "waterfall", "ocean", "wildlife", "sunset", "birds"
-]
-
+# =========================================================================
+# 3. FETCH COSMIC NATURE VIDEOS (Night Sky / Aurora Timelapses)
+# =========================================================================
 
 def _load_video_history(history_file: str) -> set:
     if os.path.exists(history_file):
@@ -339,35 +359,30 @@ def fetch_nature_video(
     max_attempts: int = 10
 ) -> str | None:
     """
-    Fetches the most popular video matching nature categories with a duration
-    between 45s and 90s, saving it to target_dir without repeating past downloads.
-    
-    Returns the file path of the downloaded video, or None if download fails.
+    Fetches high-performing night sky, aurora, or Milky Way timelapses (45s-90s)
+    to match APOD themes and pair cleanly with AI voiceovers/captions.
     """
     os.makedirs(target_dir, exist_ok=True)
     history_file = os.path.join(target_dir, "downloaded_video_history.json")
     history = _load_video_history(history_file)
 
-    logging.info(f"Searching for a new popular video ({min_duration}s–{max_duration}s) in {target_dir}...")
+    logging.info(f"Searching for popular APOD-aligned nature video ({min_duration}s–{max_duration}s)...")
 
-    shuffled_queries = NATURE_CATEGORIES.copy()
+    shuffled_queries = COSMIC_NATURE_QUERIES.copy()
     random.shuffle(shuffled_queries)
 
-    # ------------------------------------------------------------------
-    # Strategy 1: Pexels Video API Search (Ranked by Popularity/Relevance)
-    # ------------------------------------------------------------------
+    # Strategy 1: Pexels Video API Search
     if PEXELS_API_KEY:
         for query in shuffled_queries[:max_attempts]:
             url = "https://api.pexels.com/videos/search"
             headers = {"Authorization": PEXELS_API_KEY}
             
-            # Search sequentially starting at Page 1 (highest popularity rank)
             for page_num in [1, 2]:
                 params = {
                     "query": query,
                     "per_page": 20,
                     "page": page_num,
-                    "orientation": "portrait"  # Ideal for IG Reels / FB Stories / TikTok
+                    "orientation": "portrait"  # Ideal for vertical short-form posts
                 }
 
                 try:
@@ -375,9 +390,8 @@ def fetch_nature_video(
                     resp.raise_for_status()
                     videos = resp.json().get("videos", [])
 
-                    # Process in API rank order (most popular first, no random shuffling)
                     for vid in videos:
-                        vid_id = f"pexels_vid_{vid.get('id')}"
+                        vid_id = f"pexels_vid_cosmic_{vid.get('id')}"
                         if vid_id in history:
                             continue
 
@@ -385,7 +399,6 @@ def fetch_nature_video(
                         if min_duration <= duration <= max_duration:
                             video_files = vid.get("video_files", [])
                             
-                            # Select highest quality MP4 link (HD preferred)
                             best_file = next(
                                 (vf for vf in video_files if vf.get("quality") == "hd" and vf.get("file_type") == "video/mp4"),
                                 video_files[0] if video_files else None
@@ -393,10 +406,11 @@ def fetch_nature_video(
 
                             if best_file and best_file.get("link"):
                                 download_url = best_file["link"]
-                                filename = f"{vid_id}_{query}.mp4"
+                                safe_q = query.replace(" ", "_")
+                                filename = f"{vid_id}_{safe_q}.mp4"
                                 filepath = os.path.join(target_dir, filename)
 
-                                logging.info(f"Found popular Pexels video ('{query}', {duration}s, ID: {vid_id}). Downloading...")
+                                logging.info(f"Found popular APOD-blended video ('{query}', {duration}s, ID: {vid_id}). Downloading...")
                                 
                                 if _download_stream_to(filepath, download_url, headers=headers):
                                     history.add(vid_id)
@@ -404,11 +418,9 @@ def fetch_nature_video(
                                     return filepath
 
                 except Exception as e:
-                    logging.warning(f"Pexels video fetch attempt for query '{query}' page {page_num} failed: {e}")
+                    logging.warning(f"Pexels video fetch attempt for query '{query}' failed: {e}")
 
-    # ------------------------------------------------------------------
-    # Strategy 2: Pixabay Video API Fallback (Explicitly Ordered by Popularity)
-    # ------------------------------------------------------------------
+    # Strategy 2: Pixabay Video API Fallback
     if PIXABAY_API_KEY:
         for query in shuffled_queries[:max_attempts]:
             url = "https://pixabay.com/api/videos/"
@@ -417,7 +429,7 @@ def fetch_nature_video(
                 params = {
                     "key": PIXABAY_API_KEY,
                     "q": query,
-                    "order": "popular",  # Explicitly demand top-performing videos
+                    "order": "popular",
                     "per_page": 20,
                     "page": page_num
                 }
@@ -427,9 +439,8 @@ def fetch_nature_video(
                     resp.raise_for_status()
                     hits = resp.json().get("hits", [])
 
-                    # Process in API rank order
                     for hit in hits:
-                        vid_id = f"pixabay_vid_{hit.get('id')}"
+                        vid_id = f"pixabay_vid_cosmic_{hit.get('id')}"
                         if vid_id in history:
                             continue
 
@@ -440,7 +451,8 @@ def fetch_nature_video(
                             
                             if video_info and video_info.get("url"):
                                 download_url = video_info["url"]
-                                filename = f"{vid_id}_{query}.mp4"
+                                safe_q = query.replace(" ", "_")
+                                filename = f"{vid_id}_{safe_q}.mp4"
                                 filepath = os.path.join(target_dir, filename)
 
                                 logging.info(f"Found popular Pixabay video ('{query}', {duration}s, ID: {vid_id}). Downloading...")
@@ -451,11 +463,10 @@ def fetch_nature_video(
                                     return filepath
 
                 except Exception as e:
-                    logging.warning(f"Pixabay video fetch attempt for query '{query}' page {page_num} failed: {e}")
+                    logging.warning(f"Pixabay video fetch attempt for query '{query}' failed: {e}")
 
-    logging.error(f"Failed to find any new popular videos matching duration criteria ({min_duration}s–{max_duration}s).")
+    logging.error(f"Failed to find any new popular APOD-aligned videos matching duration criteria ({min_duration}s–{max_duration}s).")
     return None
-    
 # =========================================================================
 
 def fetch_pexels_video(query="nature", per_page=15):

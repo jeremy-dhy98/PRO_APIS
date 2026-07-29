@@ -14,6 +14,7 @@ import random
 import tempfile  
 import shutil
 import imageio_ffmpeg
+from typing import Optional, Set, List
 
 # Set up logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
@@ -34,10 +35,24 @@ _voiceover_cached_quote = None
 # ==========================================================
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
-# Target directory updated for Botanical Illustrations
+# Target directories
+SPACE_DIR = r"C:\Users\Jeremy\Desktop\Nature"
 NATURE_DIR = r"C:\Users\Jeremy\Desktop\Nature"
+
+SPACE_IMAGE_HISTORY_FILE = os.path.join(SPACE_DIR, "downloaded_image_history.json")
+SPACE_VIDEO_HISTORY_FILE = os.path.join(SPACE_DIR, "downloaded_video_history.json")
 NATURE_HISTORY_FILE = os.path.join(NATURE_DIR, "downloaded_images.json")
-history_file = os.path.join(NATURE_DIR,"downloaded_video_history.json")  
+
+# Categories for fetchers
+SPACE_IMAGE_QUERIES = [
+    "astronomy", "galaxy vector", "nebula background", 
+    "deep space", "cosmos pattern", "stargazing", "milky way"
+]
+
+SPACE_VIDEO_CATEGORIES = [
+    "space", "galaxy", "stars", "nebula", 
+    "astronomy", "cosmos", "night sky"
+]
 
 # Default filenames
 VIDEO_FILENAME = "46026-447087782_medium.mp4"
@@ -55,10 +70,8 @@ BG_VIDEOS_DIR = os.path.join(BASE_DIR, "bg_videos")
 BG_SOUNDS_DIR = os.path.join(BASE_DIR, "bg_sounds")
 
 # Ensure directories exist
-os.makedirs(BG_VIDEOS_DIR, exist_ok=True)
-os.makedirs(BG_SOUNDS_DIR, exist_ok=True)
-os.makedirs(FRAMES_DIR, exist_ok=True)
-os.makedirs(NATURE_DIR, exist_ok=True)
+for d in (BG_VIDEOS_DIR, BG_SOUNDS_DIR, FRAMES_DIR, NATURE_DIR, SPACE_DIR):
+    os.makedirs(d, exist_ok=True)
 
 # ─── CRITICAL WINDOWS FFmpeg & FFPROBE PATH RESOLUTION ───
 try:
@@ -82,6 +95,33 @@ try:
 except Exception as e:
     FFMPEG_EXE = None
     logging.warning(f"Could not automatically configure dynamic FFmpeg variables via imageio-ffmpeg: {e}")
+
+
+def _download_stream_to(filepath: str, url: str, headers: Optional[dict] = None, timeout: int = 20) -> bool:
+    """Streams a remote URL payload directly to a local file atomically."""
+    tmp = filepath + ".tmp"
+    try:
+        resp = requests.get(url, headers=headers or {}, stream=True, timeout=timeout)
+        resp.raise_for_status()
+        with open(tmp, "wb") as f:
+            for chunk in resp.iter_content(chunk_size=8192):
+                if chunk:
+                    f.write(chunk)
+        if os.path.exists(filepath):
+            try:
+                os.remove(filepath)
+            except Exception:
+                pass
+        os.rename(tmp, filepath)
+        return True
+    except Exception as e:
+        logging.warning(f"Download failed for {url}: {e}")
+        if os.path.exists(tmp):
+            try:
+                os.remove(tmp)
+            except Exception:
+                pass
+        return False
 
 
 def _create_silent_audio(duration_seconds, out_path):
@@ -393,90 +433,75 @@ def create_quote_mobjects(quote_text, quote_author, frame_width, frame_height):
     
     return quote_mobject, author_mobject
 
-def _download_stream_to(path, url, headers=None, timeout=30):
-    """Stream a URL to a temp file and atomically rename on success."""
-    tmp = path + ".part"
-    try:
-        with requests.get(url, stream=True, headers=(headers or {}), timeout=timeout) as r:
-            r.raise_for_status()
-            with open(tmp, "wb") as f:
-                for chunk in r.iter_content(chunk_size=1024*1024):
-                    if chunk:
-                        f.write(chunk)
-        if os.path.exists(path):
-            try:
-                os.remove(path)
-            except Exception:
-                pass
-        os.rename(tmp, path)
-        return True
-    except Exception as e:
-        logging.warning(f"Download stream pipeline mapping failed for target {url}: {e}")
-        try:
-            if os.path.exists(tmp):
-                os.remove(tmp)
-        except Exception:
-            pass
-        return False
 
 # ==========================================================
-# ENHANCED FEATURE: FETCH BOTANICAL ILLUSTRATIONS 
-# Includes Fix for "No unique candidate" Error
+# ASTRONOMY IMAGE FETCHER (PORTRAIT / 9:16 BLENDING)
 # ==========================================================
-def _load_downloaded_image_history():
-    """Reads previously saved image IDs to guarantee unique downloads on every run."""
-    if os.path.exists(NATURE_HISTORY_FILE):
+def _load_downloaded_image_history(history_file: str = SPACE_IMAGE_HISTORY_FILE) -> set:
+    """Reads saved image IDs to guarantee unique downloads with corruption protection."""
+    if os.path.exists(history_file):
+        if os.path.getsize(history_file) == 0:
+            logging.warning(f"Image history file '{history_file}' is empty. Initializing new history.")
+            return set()
+        
         try:
-            with open(NATURE_HISTORY_FILE, "r", encoding="utf-8") as f:
-                return set(json.load(f))
+            with open(history_file, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                return set(data) if isinstance(data, list) else set()
+        except (json.JSONDecodeError, ValueError) as e:
+            logging.warning(f"Image history file is corrupted: {e}. Initializing new history.")
         except Exception as e:
-            logging.warning(f"Failed loading downloaded image history log: {e}")
+            logging.warning(f"Could not load image history: {e}")
+            
     return set()
 
-def _save_downloaded_image_history(history_set):
-    """Saves updated download history log."""
+def _save_downloaded_image_history(history_file: str, history_set: set):
+    """Saves updated download history using atomic writing to prevent corruption."""
+    temp_file = f"{history_file}.tmp"
     try:
-        with open(NATURE_HISTORY_FILE, "w", encoding="utf-8") as f:
+        with open(temp_file, "w", encoding="utf-8") as f:
             json.dump(list(history_set), f, indent=2)
+            
+        os.replace(temp_file, history_file)
     except Exception as e:
-        logging.warning(f"Failed writing image history log: {e}")
+        logging.warning(f"Could not save image history: {e}")
+        if os.path.exists(temp_file):
+            try:
+                os.remove(temp_file)
+            except Exception:
+                pass
 
-def fetch_and_save_hd_images(target_count=5):
+def fetch_and_save_hd_space_images(
+    target_dir: str = SPACE_DIR,
+    history_file: str = SPACE_IMAGE_HISTORY_FILE,
+    target_count: int = 5
+) -> int:
     """
-    Fetches `target_count` unique, top-rated Botanical Illustrations from Pexels or Pixabay.
-    Includes safeguards against API history exhaustion while prioritizing popular results.
+    Fetches unique space/astronomy background images in portrait orientation (9:16)
+    for seamless blending with social media video layouts.
     """
-    logging.info(f"Initiating Botanical Image Fetcher (Target: {target_count} -> {NATURE_DIR})")
-    os.makedirs(NATURE_DIR, exist_ok=True)
+    logging.info(f"Initiating Space Image Fetcher (Target: {target_count} -> {target_dir})")
+    os.makedirs(target_dir, exist_ok=True)
     
-    history = _load_downloaded_image_history()
+    history = _load_downloaded_image_history(history_file)
     raw_candidates = []
     
-    # Extensive Botanical Queries
-    queries = [
-        "botanical vector", "flower pattern", 
-        "abstract leaves", "floral background", 
-        "nature background", 
-        "boho floral", "watercolor background"
-    ]
-    
-    # Shuffle queries so every run searches different topics first, but always pulls top-ranked Page 1 results
+    queries = SPACE_IMAGE_QUERIES.copy()
     random.shuffle(queries)
 
     for query in queries:
-        # Stop querying APIs if we have gathered enough top candidates
         if len(raw_candidates) >= target_count * 5:
             break
 
-        # 1. Query Pexels Photos API (Page 1 holds the most popular/relevant images)
+        # 1. Query Pexels Photos API (Portrait orientation for vertical video overlays)
         if PEXELS_API_KEY:
             url = "https://api.pexels.com/v1/search"
             headers = {"Authorization": PEXELS_API_KEY}
             params = {
                 "query": query, 
                 "per_page": 15, 
-                "page": 1,  # Page 1 yields top-ranked results
-                "orientation": "landscape"
+                "page": 1,
+                "orientation": "portrait"
             }
             try:
                 resp = requests.get(url, headers=headers, params=params, timeout=10)
@@ -491,18 +516,17 @@ def fetch_and_save_hd_images(target_count=5):
             except Exception as e:
                 logging.warning(f"Failed fetching photos from Pexels for '{query}': {e}")
 
-        # 2. Query Pixabay Images API (Explicitly set order to popular on Page 1)
+        # 2. Query Pixabay Images API (Vertical orientation)
         if PIXABAY_API_KEY:
             url = "https://pixabay.com/api/"
             params = {
                 "key": PIXABAY_API_KEY,
                 "q": query,
-                "image_type": "illustration",
-                "orientation": "horizontal",
-                "order": "popular",  # Explicitly demand most popular items
-                "min_width": 1920,
+                "image_type": "all",
+                "orientation": "vertical",
+                "order": "popular",
                 "per_page": 15,
-                "page": 1  # Page 1 yields top-ranked results
+                "page": 1
             }
             try:
                 resp = requests.get(url, params=params, timeout=10)
@@ -516,49 +540,42 @@ def fetch_and_save_hd_images(target_count=5):
             except Exception as e:
                 logging.warning(f"Failed fetching photos from Pixabay for '{query}': {e}")
 
-    # Check if API actually returned data
     if not raw_candidates:
-        logging.error("APIs returned ZERO images. Your API keys may be invalid or you have hit a rate limit.")
+        logging.error("APIs returned ZERO images. Verify API keys or rate limits.")
         return 0
 
-    # Filter candidates against history log (maintaining original popular ranking)
     candidates = [c for c in raw_candidates if c[0] not in history]
 
-    # Safeguard: If history blocked all top images, clear history to prevent failure
     if not candidates and raw_candidates:
-        logging.warning("All fetched popular images were already in history! Clearing history to reset pool.")
+        logging.warning("All fetched images were already downloaded! Resetting history pool.")
         history.clear()
         candidates = raw_candidates
 
     saved_count = 0
 
-    # Process candidates in order of popularity (No random.shuffle)
     for img_id, img_url in candidates:
         if saved_count >= target_count:
             break
 
         timestamp = int(time.time())
         filename = f"{img_id}_{timestamp}.jpg"
-        filepath = os.path.join(NATURE_DIR, filename)
+        filepath = os.path.join(target_dir, filename)
 
-        logging.info(f"Downloading Popular Botanical Illustration ({saved_count + 1}/{target_count}): {img_url}")
+        logging.info(f"Downloading Space Background Image ({saved_count + 1}/{target_count}): {img_url}")
         if _download_stream_to(filepath, img_url):
             history.add(img_id)
             saved_count += 1
 
-    _save_downloaded_image_history(history)
-    logging.info(f"Done! Successfully saved {saved_count} new unique popular illustrations to: {NATURE_DIR}")
+    _save_downloaded_image_history(history_file, history)
+    logging.info(f"Done! Successfully saved {saved_count} space images to: {target_dir}")
     return saved_count
-    
-# Categories list 
-NATURE_CATEGORIES = [
-    "nature", "landscape", "mountains", "forest", 
-    "waterfall", "ocean", "wildlife", "sunset", "birds"
-]
 
-def _load_video_history(history_file: str) -> set:
+
+# ==========================================================
+# ASTRONOMY VIDEO FETCHER (PORTRAIT / 9:16)
+# ==========================================================
+def _load_video_history(history_file: str = SPACE_VIDEO_HISTORY_FILE) -> set:
     if os.path.exists(history_file):
-        # Ignore 0-byte empty files and avoid JSONDecodeError
         if os.path.getsize(history_file) == 0:
             logging.warning(f"Video history file '{history_file}' is empty. Initializing new history.")
             return set()
@@ -577,7 +594,6 @@ def _load_video_history(history_file: str) -> set:
 def _save_video_history(history_file: str, history_set: set):
     temp_file = f"{history_file}.tmp"
     try:
-        # Atomic write: Write to a temp file first, then atomically replace the target
         with open(temp_file, "w", encoding="utf-8") as f:
             json.dump(list(history_set), f, indent=2)
             
@@ -589,42 +605,38 @@ def _save_video_history(history_file: str, history_set: set):
                 os.remove(temp_file)
             except Exception:
                 pass
-def fetch_nature_video(
-    target_dir: str = r"C:\Users\Jeremy\Desktop\Nature",
-    min_duration: int = 45,
-    max_duration: int = 90,
+
+def fetch_space_video(
+    target_dir: str = SPACE_DIR,
+    min_duration: int = 15,
+    max_duration: int = 60,
     max_attempts: int = 10
-) -> str | None:
+) -> Optional[str]:
     """
-    Fetches the most popular video matching nature categories with a duration
-    between min_duration and max_duration, ensuring no duplicate downloads across runs.
-    
+    Fetches a popular portrait space/astronomy video (15s–60s) for background composition.
     Returns the file path of the downloaded video, or None if download fails.
     """
     os.makedirs(target_dir, exist_ok=True)
     history_file = os.path.join(target_dir, "downloaded_video_history.json")
     history = _load_video_history(history_file)
 
-    logging.info(f"Searching for a new popular video ({min_duration}s–{max_duration}s) in {target_dir}...")
+    logging.info(f"Searching for space video ({min_duration}s–{max_duration}s) in {target_dir}...")
 
-    shuffled_queries = NATURE_CATEGORIES.copy()
+    shuffled_queries = SPACE_VIDEO_CATEGORIES.copy()
     random.shuffle(shuffled_queries)
 
-    # ------------------------------------------------------------------
-    # Strategy 1: Pexels Video API Search (Ranked by Popularity/Relevance)
-    # ------------------------------------------------------------------
+    # Strategy 1: Pexels Video API Search
     if PEXELS_API_KEY:
         for query in shuffled_queries[:max_attempts]:
             url = "https://api.pexels.com/videos/search"
             headers = {"Authorization": PEXELS_API_KEY}
             
-            # Start on Page 1 for top popularity; check Page 2 if duration filter skips all Page 1 videos
             for page_num in [1, 2]:
                 params = {
                     "query": query,
                     "per_page": 20,
                     "page": page_num,
-                    "orientation": "portrait"  # Ideal for IG Reels / FB Stories / TikTok
+                    "orientation": "portrait"
                 }
 
                 try:
@@ -632,7 +644,6 @@ def fetch_nature_video(
                     resp.raise_for_status()
                     videos = resp.json().get("videos", [])
 
-                    # Iterate in API rank order (highest quality/popularity first)
                     for vid in videos:
                         vid_id = f"pexels_vid_{vid.get('id')}"
                         if vid_id in history:
@@ -641,8 +652,6 @@ def fetch_nature_video(
                         duration = vid.get("duration", 0)
                         if min_duration <= duration <= max_duration:
                             video_files = vid.get("video_files", [])
-                            
-                            # Select highest quality MP4 link (preferably HD)
                             best_file = next(
                                 (vf for vf in video_files if vf.get("quality") == "hd" and vf.get("file_type") == "video/mp4"),
                                 video_files[0] if video_files else None
@@ -653,7 +662,7 @@ def fetch_nature_video(
                                 filename = f"{vid_id}_{query}.mp4"
                                 filepath = os.path.join(target_dir, filename)
 
-                                logging.info(f"Found top Pexels video ('{query}', {duration}s, ID: {vid_id}). Downloading...")
+                                logging.info(f"Found Pexels space video ('{query}', {duration}s, ID: {vid_id}). Downloading...")
                                 
                                 if _download_stream_to(filepath, download_url, headers=headers):
                                     history.add(vid_id)
@@ -661,11 +670,9 @@ def fetch_nature_video(
                                     return filepath
 
                 except Exception as e:
-                    logging.warning(f"Pexels video fetch attempt for query '{query}' page {page_num} failed: {e}")
+                    logging.warning(f"Pexels video fetch attempt for query '{query}' failed: {e}")
 
-    # ------------------------------------------------------------------
-    # Strategy 2: Pixabay Video API Fallback (Explicitly Ordered by Popularity)
-    # ------------------------------------------------------------------
+    # Strategy 2: Pixabay Video API Fallback
     if PIXABAY_API_KEY:
         for query in shuffled_queries[:max_attempts]:
             url = "https://pixabay.com/api/videos/"
@@ -674,7 +681,7 @@ def fetch_nature_video(
                 params = {
                     "key": PIXABAY_API_KEY,
                     "q": query,
-                    "order": "popular",  # Explicitly demand most popular videos
+                    "order": "popular",
                     "per_page": 20,
                     "page": page_num
                 }
@@ -684,7 +691,6 @@ def fetch_nature_video(
                     resp.raise_for_status()
                     hits = resp.json().get("hits", [])
 
-                    # Iterate in API rank order
                     for hit in hits:
                         vid_id = f"pixabay_vid_{hit.get('id')}"
                         if vid_id in history:
@@ -700,7 +706,7 @@ def fetch_nature_video(
                                 filename = f"{vid_id}_{query}.mp4"
                                 filepath = os.path.join(target_dir, filename)
 
-                                logging.info(f"Found top Pixabay video ('{query}', {duration}s, ID: {vid_id}). Downloading...")
+                                logging.info(f"Found Pixabay space video ('{query}', {duration}s, ID: {vid_id}). Downloading...")
                                 
                                 if _download_stream_to(filepath, download_url):
                                     history.add(vid_id)
@@ -708,9 +714,9 @@ def fetch_nature_video(
                                     return filepath
 
                 except Exception as e:
-                    logging.warning(f"Pixabay video fetch attempt for query '{query}' page {page_num} failed: {e}")
+                    logging.warning(f"Pixabay video fetch attempt for query '{query}' failed: {e}")
 
-    logging.error(f"Failed to find any new popular videos matching duration criteria ({min_duration}s–{max_duration}s).")
+    logging.error(f"No new space videos matched the duration criteria ({min_duration}s–{max_duration}s).")
     return None
     
 def fetch_pexels_video(query="nature", per_page=15):
@@ -811,7 +817,7 @@ def fetch_background_video_for_topic(topic="nature"):
     if q:
         logging.info("Successfully fetched background source target using Pixabay layer engines.")
         return q
-    logging.warning("Could not gather online live video backgrounds mapping for item '%s'. Defaulting to local media assets storage." % topic)
+    logging.warning(f"Could not gather online live video backgrounds mapping for item '{topic}'. Defaulting to local media assets storage.")
     return None
 
 
@@ -819,12 +825,13 @@ class AnimatedQuoteWithBackground(Scene):
     def construct(self):
         total_duration = 7
 
-        # ── Trigger 5 HD Botanical Image Download Enhancement ──
+        # ── Trigger HD Space Image & Video Fetch ──
+        space_video_file = None
         try:
-            fetch_and_save_hd_images(target_count=5)
-            fetch_nature_video()
+            fetch_and_save_hd_space_images(target_count=10)
+            space_video_file = fetch_space_video(target_dir=SPACE_DIR)
         except Exception as e:
-            logging.warning(f"HD desktop image fetch step failed: {e}")
+            logging.warning(f"HD image/video fetch step failed: {e}")
 
         def _remove_path_safe(path):
             try:
@@ -890,17 +897,20 @@ class AnimatedQuoteWithBackground(Scene):
         else:
             logging.warning(f"Background ambient tracking sound module file not detected at pathway location: {SOUND_PATH}")
 
-        # Fetch Background Video
-        env_topic = os.environ.get("BG_QUERY", None)
-        if env_topic:
-            chosen_topic = env_topic.strip()
-            logging.info(f"BG_QUERY parameter loaded explicitly via system env: '{chosen_topic}'")
+        # Resolve Background Video File
+        if space_video_file and os.path.exists(space_video_file):
+            video_background_file = space_video_file
         else:
-            chosen_topic = random.choice(["nature", "birds", "art"])
-            logging.info(f"No specific environment BG_QUERY parsed. Random fallback selection applied: '{chosen_topic}'")
+            env_topic = os.environ.get("BG_QUERY", None)
+            if env_topic:
+                chosen_topic = env_topic.strip()
+                logging.info(f"BG_QUERY parameter loaded explicitly via system env: '{chosen_topic}'")
+            else:
+                chosen_topic = random.choice(["nature", "birds", "art", "space"])
+                logging.info(f"No specific environment BG_QUERY parsed. Random fallback selection applied: '{chosen_topic}'")
 
-        fetched_video = fetch_background_video_for_topic(chosen_topic)
-        video_background_file = fetched_video if (fetched_video and os.path.exists(fetched_video)) else VIDEO_PATH
+            fetched_video = fetch_background_video_for_topic(chosen_topic)
+            video_background_file = fetched_video if (fetched_video and os.path.exists(fetched_video)) else VIDEO_PATH
 
         # Break Media Into Constituent Images
         video_frames = extract_video_frames(video_background_file, fps=30)
@@ -921,7 +931,8 @@ class AnimatedQuoteWithBackground(Scene):
 
             def rapid_image_swap(mob, dt):
                 swap_speed = 15  
-                index = int((self.time * swap_speed) % len(bg_pool))
+                time_val = getattr(self.renderer, 'time', 0) if hasattr(self, 'renderer') else 0
+                index = int((time_val * swap_speed) % len(bg_pool))
                 mob.become(bg_pool[index])
 
             bg_container.add_updater(rapid_image_swap)
@@ -945,19 +956,17 @@ class AnimatedQuoteWithBackground(Scene):
                 self.add_sound(audio, gain=+10)
 
         # Text Animations Timeline
-        time_fadein = 0.8
-        time_write = 2
-        time_color = 1
+        time_write = 2.0
+        time_color = 1.0
         time_scale = 0.8
         time_author = 0.8
 
-        self.play(FadeIn(q_mobj, shift=UP, scale=1.2), run_time=time_fadein)
         self.play(Write(q_mobj), run_time=time_write)
         self.play(q_mobj.animate.set_color_by_gradient(BLUE, PURPLE), run_time=time_color)
         self.play(q_mobj.animate.scale(1.1), run_time=time_scale)
         self.play(FadeIn(a_mobj, shift=UP), run_time=time_author)
 
-        time_used = time_fadein + time_write + time_color + time_scale + time_author
+        time_used = time_write + time_color + time_scale + time_author
         remaining_time = total_duration - time_used
 
         if remaining_time > 1e-6:
@@ -969,4 +978,3 @@ if __name__ == '__main__':
     if os.environ.get("AUTO_PREEXTRACT", "0") in ("1", "true", "yes"):
         if os.path.exists(VIDEO_PATH):
             extract_video_frames(VIDEO_PATH, fps=30)
-    pass
