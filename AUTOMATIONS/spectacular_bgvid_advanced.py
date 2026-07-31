@@ -38,10 +38,11 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 # Target directories
 SPACE_DIR = r"C:\Users\Jeremy\Desktop\Nature"
 NATURE_DIR = r"C:\Users\Jeremy\Desktop\Nature"
+History = r"C:\Users\Jeremy\Desktop\PROJECTS\TUTOR_001\TUTOR_001\TUTORIALS_MOTIVATION"
 
-SPACE_IMAGE_HISTORY_FILE = os.path.join(SPACE_DIR, "downloaded_image_history.json")
-SPACE_VIDEO_HISTORY_FILE = os.path.join(SPACE_DIR, "downloaded_video_history.json")
-NATURE_HISTORY_FILE = os.path.join(NATURE_DIR, "downloaded_images.json")
+SPACE_IMAGE_HISTORY_FILE = os.path.join(History, "downloaded_image_history.json")
+SPACE_VIDEO_HISTORY_FILE = os.path.join(History, "downloaded_video_history.json")
+NATURE_HISTORY_FILE = os.path.join(History, "downloaded_images.json")
 
 # Categories for fetchers
 SPACE_IMAGE_QUERIES = [
