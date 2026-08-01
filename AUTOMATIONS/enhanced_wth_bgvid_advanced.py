@@ -35,7 +35,7 @@ CAT_IMAGE_FILENAME = "cat_image.jpg"
 
 
 # Target directory for the 5 new HD Nature images
-NATURE_IMAGES_DIR = r"C:\Users\Jeremy\Desktop\PROJECTS\TUTOR_001\TUTOR_001\TUTORIALS_MOTIVATION"
+NATURE_IMAGES_DIR = r"C:\Users\Jeremy\Desktop\Nature"
 History = r"C:\Users\Jeremy\Desktop\PROJECTS\TUTOR_001\TUTOR_001\TUTORIALS_MOTIVATION"
 
 history_file = os.path.join(History,"downloaded_video_history.json")  

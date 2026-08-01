@@ -38,6 +38,7 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 # Target directories
 History = r"C:\Users\Jeremy\Desktop\PROJECTS\TUTOR_001\TUTOR_001\TUTORIALS_MOTIVATION"
 
+SPACE_DIR = r"C:\Users\Jeremy\Desktop\Nature"
 SPACE_IMAGE_HISTORY_FILE = os.path.join(History, "downloaded_image_history.json")
 SPACE_VIDEO_HISTORY_FILE = os.path.join(History, "downloaded_video_history.json")
 NATURE_HISTORY_FILE = os.path.join(History, "downloaded_images.json")
@@ -69,8 +70,8 @@ BG_VIDEOS_DIR = os.path.join(BASE_DIR, "bg_videos")
 BG_SOUNDS_DIR = os.path.join(BASE_DIR, "bg_sounds")
 
 # Ensure directories exist
-for d in (BG_VIDEOS_DIR, BG_SOUNDS_DIR, FRAMES_DIR, NATURE_DIR, SPACE_DIR):
-    os.makedirs(d, exist_ok=True)
+for d in (BG_VIDEOS_DIR, BG_SOUNDS_DIR, FRAMES_DIR, NATURE_HISTORY_FILE, SPACE_VIDEO_HISTORY_FILE, SPACE_IMAGE_HISTORY_FILE, SPACE_DIR):
+    os.makedirs(os.path.dirname(d), exist_ok=True)
 
 # ─── CRITICAL WINDOWS FFmpeg & FFPROBE PATH RESOLUTION ───
 try:
