@@ -33,8 +33,9 @@ EXPECTED_VIDEO = os.path.normpath(os.path.join(BASE_DIR, "219305_tiny.mp4"))
 EXPECTED_SOUND = os.path.normpath(os.path.abspath(os.path.join(BASE_DIR, "subclip.ogg")))
 CAT_IMAGE_FILENAME = "cat_image.jpg"
 
+
 # Target directory for the 5 new HD Nature images
-NATURE_IMAGES_DIR = r"C:\Users\Jeremy\Desktop\Nature"
+NATURE_IMAGES_DIR = r"C:\Users\Jeremy\Desktop\PROJECTS\TUTOR_001\TUTOR_001\TUTORIALS_MOTIVATION"
 History = r"C:\Users\Jeremy\Desktop\PROJECTS\TUTOR_001\TUTOR_001\TUTORIALS_MOTIVATION"
 
 history_file = os.path.join(History,"downloaded_video_history.json")  
