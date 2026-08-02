@@ -411,7 +411,7 @@ def fetch_nature_video(
                                 download_url = best_file["link"]
                                 safe_q = query.replace(" ", "_")
                                 filename = f"{vid_id}_{safe_q}.mp4"
-                                filepath = os.path.join(target_dir, filename)
+                                filepath = os.path.join(NATURE_IMAGES_DIR, filename)
 
                                 logging.info(f"Found popular APOD-blended video ('{query}', {duration}s, ID: {vid_id}). Downloading...")
                                 
@@ -456,7 +456,7 @@ def fetch_nature_video(
                                 download_url = video_info["url"]
                                 safe_q = query.replace(" ", "_")
                                 filename = f"{vid_id}_{safe_q}.mp4"
-                                filepath = os.path.join(target_dir, filename)
+                                filepath = os.path.join(NATURE_IMAGES_DIR, filename)
 
                                 logging.info(f"Found popular Pixabay video ('{query}', {duration}s, ID: {vid_id}). Downloading...")
                                 

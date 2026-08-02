@@ -617,7 +617,7 @@ def fetch_space_video(
     Returns the file path of the downloaded video, or None if download fails.
     """
     os.makedirs(target_dir, exist_ok=True)
-    history_file = os.path.join(target_dir, "downloaded_video_history.json")
+    history_file = SPACE_VIDEO_HISTORY_FILE
     history = _load_video_history(history_file)
 
     logging.info(f"Searching for space video ({min_duration}s–{max_duration}s) in {target_dir}...")
@@ -660,7 +660,7 @@ def fetch_space_video(
                             if best_file and best_file.get("link"):
                                 download_url = best_file["link"]
                                 filename = f"{vid_id}_{query}.mp4"
-                                filepath = os.path.join(target_dir, filename)
+                                filepath = os.path.join(SPACE_DIR, filename)
 
                                 logging.info(f"Found Pexels space video ('{query}', {duration}s, ID: {vid_id}). Downloading...")
                                 
@@ -704,7 +704,7 @@ def fetch_space_video(
                             if video_info and video_info.get("url"):
                                 download_url = video_info["url"]
                                 filename = f"{vid_id}_{query}.mp4"
-                                filepath = os.path.join(target_dir, filename)
+                                filepath = os.path.join(SPACE_DIR, filename)
 
                                 logging.info(f"Found Pixabay space video ('{query}', {duration}s, ID: {vid_id}). Downloading...")
                                 
