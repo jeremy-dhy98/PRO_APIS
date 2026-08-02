@@ -356,7 +356,7 @@ def _save_video_history(history_file: str, history_set: set):
         logging.warning(f"Could not save video history: {e}")
 
 def fetch_nature_video(
-    target_dir: str = r"C:\Users\Jeremy\Desktop\Nature",
+    target_dir: str = r"C:\Users\Jeremy\Desktop\PROJECTS\TUTOR_001\TUTOR_001\TUTORIALS_MOTIVATION",
     min_duration: int = 45,
     max_duration: int = 90,
     max_attempts: int = 10

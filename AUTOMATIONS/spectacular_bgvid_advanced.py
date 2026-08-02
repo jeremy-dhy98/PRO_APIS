@@ -70,7 +70,7 @@ BG_VIDEOS_DIR = os.path.join(BASE_DIR, "bg_videos")
 BG_SOUNDS_DIR = os.path.join(BASE_DIR, "bg_sounds")
 
 # Ensure directories exist
-for d in (BG_VIDEOS_DIR, BG_SOUNDS_DIR, FRAMES_DIR, NATURE_HISTORY_FILE, SPACE_VIDEO_HISTORY_FILE, SPACE_IMAGE_HISTORY_FILE, SPACE_DIR):
+for d in (BG_VIDEOS_DIR, BG_SOUNDS_DIR, FRAMES_DIR, NATURE_HISTORY_FILE, SPACE_DIR):
     os.makedirs(os.path.dirname(d), exist_ok=True)
 
 # ─── CRITICAL WINDOWS FFmpeg & FFPROBE PATH RESOLUTION ───
@@ -607,7 +607,7 @@ def _save_video_history(history_file: str, history_set: set):
                 pass
 
 def fetch_space_video(
-    target_dir: str = SPACE_DIR,
+    target_dir: str = History,
     min_duration: int = 15,
     max_duration: int = 60,
     max_attempts: int = 10
