@@ -640,11 +640,22 @@ def get_audio_duration(audio_file):
         logging.warning(f"Could not get audio duration for {audio_file}: {e}")
         return None
 
-def fetch_voiceover(quote, api_key, fallback_silent_duration=4):
+
+def fetch_voiceover(
+    quote: str,
+    api_key: str,
+    fallback_silent_duration: int = 4,
+    max_retries: int = 3,
+    retry_delay: float = 3.0,
+) -> str:
+    """Fetches voiceover for the given quote using VoiceRSS API with retry logic and timeout protection."""
     global voiceover_file, _voiceover_cached_quote
+
+    # 1. Return cached file if quote matches and file exists
     if _voiceover_cached_quote == quote and voiceover_file and os.path.exists(voiceover_file):
         return voiceover_file
-    
+
+    # 2. Cleanup legacy/existing files
     for fn in ("voiceover.mp3", "voiceover.wav"):
         if os.path.exists(fn):
             try:
@@ -654,6 +665,8 @@ def fetch_voiceover(quote, api_key, fallback_silent_duration=4):
 
     voiceover_file = None
     _voiceover_cached_quote = None
+
+    # 3. Missing API key fallback
     if not api_key:
         logging.warning("VOICE_RSS_API_KEY not set; using silent fallback audio")
         voiceover_file = _create_silent_audio(fallback_silent_duration, out_path="voiceover.mp3")
@@ -669,35 +682,63 @@ def fetch_voiceover(quote, api_key, fallback_silent_duration=4):
         "c": "mp3",
         "f": "44khz_16bit_stereo",
         "b64": "false",
-        "v": "John"
+        "v": "John",
     }
-    try:
-        response = requests.get(url, params=params, timeout=15)
-        response.raise_for_status()
-        ct = response.headers.get("Content-Type", "")
-        if "audio" not in ct.lower() and not response.content.startswith(b"ID3"):
-            logging.error("TTS returned non-audio content; falling back to silent audio")
-            voiceover_file = _create_silent_audio(fallback_silent_duration, out_path="voiceover.mp3")
-            _voiceover_cached_quote = quote
-            return voiceover_file
-        if len(response.content) < 1000:
-            logging.warning("TTS returned suspiciously small payload; using silent fallback")
-            voiceover_file = _create_silent_audio(fallback_silent_duration, out_path="voiceover.mp3")
-            _voiceover_cached_quote = quote
-            return voiceover_file
-            
-        with open("voiceover.mp3", "wb") as f:
-            f.write(response.content)
-        voiceover_file = "voiceover.mp3"
-        _voiceover_cached_quote = quote
-        logging.info("Downloaded voiceover.mp3")
-        return voiceover_file
-    except Exception as e:
-        logging.error(f"Error fetching voiceover: {e}; using silent fallback")
-        voiceover_file = _create_silent_audio(fallback_silent_duration, out_path="voiceover.mp3")
-        _voiceover_cached_quote = quote
-        return voiceover_file
 
+    # (connect_timeout, read_timeout): 10s to connect, 45s to render/stream MP3 payload
+    timeout_config = (10, 45)
+
+    # 4. Retry loop with exponential backoff
+    for attempt in range(1, max_retries + 1):
+        try:
+            logging.info(f"Fetching VoiceRSS audio (attempt {attempt}/{max_retries})...")
+            response = requests.get(url, params=params, timeout=timeout_config)
+            response.raise_for_status()
+
+            # VoiceRSS returns plain-text API error messages (e.g. rate limits or bad keys)
+            if response.content.startswith(b"ERROR:"):
+                error_msg = response.content.decode("utf-8", errors="ignore")
+                logging.error(f"VoiceRSS returned API error payload: {error_msg}")
+                break
+
+            ct = response.headers.get("Content-Type", "")
+            if "audio" not in ct.lower() and not response.content.startswith(b"ID3"):
+                logging.error("TTS returned non-audio content; falling back to silent audio")
+                break
+
+            if len(response.content) < 1000:
+                logging.warning("TTS returned suspiciously small payload; using silent fallback")
+                break
+
+            with open("voiceover.mp3", "wb") as f:
+                f.write(response.content)
+
+            voiceover_file = "voiceover.mp3"
+            _voiceover_cached_quote = quote
+            logging.info("Downloaded voiceover.mp3 cleanly")
+            return voiceover_file
+
+        except (requests.exceptions.Timeout, requests.exceptions.RequestException) as e:
+            wait_time = retry_delay * attempt
+            if attempt >= max_retries:
+                logging.error(f"VoiceRSS request failed after {max_retries} attempts: {e}")
+                break
+
+            logging.warning(
+                f"VoiceRSS attempt {attempt}/{max_retries} timed out or failed: {e}. "
+                f"Retrying in {wait_time:.1f}s..."
+            )
+            time.sleep(wait_time)
+
+        except Exception as e:
+            logging.error(f"Error fetching voiceover: {e}; using silent fallback")
+            break
+
+    # 5. Fallback on error or exhausted retries
+    voiceover_file = _create_silent_audio(fallback_silent_duration, out_path="voiceover.mp3")
+    _voiceover_cached_quote = quote
+    return voiceover_file
+    
 def trim_audio(audio_file, max_duration=30):
     if not audio_file or not os.path.exists(audio_file):
         logging.warning(f"trim_audio: missing input: {audio_file}")

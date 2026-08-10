@@ -10,11 +10,21 @@ import textwrap
 from pydub import AudioSegment
 import imageio_ffmpeg
 
+# ==========================================
+# FOLDER PATH CONFIGURATIONS
+# ==========================================
+# Default base directory for the original media output
+DEFAULT_BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+# Target directory for the new enhancement media output
+ENHANCEMENT_DIR = r"C:\Users\Jeremy\Desktop\StellarViewsDaily"
+os.makedirs(ENHANCEMENT_DIR, exist_ok=True)
+
 # Set up logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
-# Resolve paths relative to the script location
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+# Resolve default paths relative to the script location
+BASE_DIR = DEFAULT_BASE_DIR
 
 # Load API keys from environment variables and safely strip hidden whitespace characters
 cat_api_key = os.environ.get("CAT_API_KEY", "").strip() or None
@@ -93,6 +103,35 @@ def fetch_quote():
         logging.error(f"Error fetching quote via API: {e}. Utilizing premium local backup context.")
         
     return random.choice(local_fallbacks)
+
+def fetch_education_quote():
+    """Fetches a curated quote specifically about education and related categories."""
+    url = "https://zenquotes.io/api/quotes"
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    }
+    education_keywords = ["education", "learn", "knowledge", "teach", "mind", "wisdom", "study", "growth", "book", "school"]
+    education_fallbacks = [
+        {"quote": "Education is the most powerful weapon which you can use to change the world.", "author": "Nelson Mandela"},
+        {"quote": "An investment in knowledge pays the best interest.", "author": "Benjamin Franklin"},
+        {"quote": "Live as if you were to die tomorrow. Learn as if you were to live forever.", "author": "Mahatma Gandhi"}
+    ]
+    try:
+        response = requests.get(url, headers=headers, timeout=10)
+        response.raise_for_status()
+        data = response.json()
+        if isinstance(data, list) and data:
+            matching_quotes = []
+            for item in data:
+                q_text = item.get("q", "").lower()
+                if any(kw in q_text for kw in education_keywords):
+                    matching_quotes.append({"quote": item.get("q"), "author": item.get("a", "Unknown")})
+            if matching_quotes:
+                return random.choice(matching_quotes)
+    except Exception as e:
+        logging.error(f"Error fetching education quote: {e}")
+    return random.choice(education_fallbacks)
+
 def fetch_cat_image(api_key, target_width=1280, target_height=720):
     """
     Fetches a random cat image from TheCatAPI and saves it locally.
@@ -596,6 +635,50 @@ class AnimatedQuoteWithBackground(BaseQuoteScene):
         looped_effect = loop_sound(cool_effect_file, target_duration=total_duration)
         if looped_effect and os.path.exists(looped_effect):
             self.add_sound(looped_effect, gain=+5)
+        else:
+            logging.info("No background sound available; continuing without it.")
+        
+        background = Rectangle(width=config.frame_width, height=config.frame_height)
+        background.set_color_by_gradient(BLUE, PURPLE, RED)
+        self.add(background)
+        
+        self.play(background.animate.set_color_by_gradient(GREEN, BLUE), run_time=0.5)
+        
+        image_path = fetch_cat_image(cat_api_key)
+        if image_path and os.path.exists(image_path):
+            bg_image = ImageMobject(image_path).scale_to_fit_width(self.camera.frame_width)
+            self.add(bg_image)
+        
+        quote_mobject, author_mobject = create_quote_mobjects(
+            quote_text, quote_author, self.camera.frame_width, self.camera.frame_height
+        )
+        quote_mobject.move_to(UP * 0.5)
+        author_mobject.next_to(quote_mobject, DOWN, buff=0.5)
+        
+        self.apply_text_effects(quote_mobject, author_mobject, sync_duration=voiceover_duration)
+        
+        self.wait(total_duration)
+
+class EducationCatQuoteScene(BaseQuoteScene):
+    """New enhancement scene: Curated education quote overlaying a popular cat image background."""
+    
+    def construct(self):
+        quote_data = fetch_education_quote()
+        quote_text = f"\"{quote_data['quote']}\""
+        quote_author = f"- {quote_data['author']}"
+        
+        audio_file = fetch_voiceover(quote_text, voice_api_key)
+        if audio_file and os.path.exists(audio_file):
+            voiceover_duration = get_audio_duration(audio_file)
+            total_duration = voiceover_duration if voiceover_duration and voiceover_duration > 0 else 7
+            self.add_sound(audio_file, gain=+20)
+        else:
+            total_duration = 7
+            voiceover_duration = total_query_duration = total_duration
+        
+        looped_effect = loop_sound(cool_effect_file, target_duration=total_duration)
+        if looped_effect and os.path.exists(looped_effect):
+            self.add_sound(looped_effect, gain=5)
         else:
             logging.info("No background sound available; continuing without it.")
         

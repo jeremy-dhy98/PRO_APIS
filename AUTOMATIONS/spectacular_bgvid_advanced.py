@@ -346,16 +346,25 @@ def fetch_quote(max_attempts=3, timeout=8):
     logging.info(f"Using high quality local backup quote module: {quote_data}")
     return result
 
-def fetch_voiceover(quote, api_key):
-    """Fetches voiceover for the given quote using VoiceRSS API."""
+
+def fetch_voiceover(
+    quote: str,
+    api_key: str,
+    max_retries: int = 3,
+    retry_delay: float = 3.0,
+) -> str:
+    """Fetches voiceover for the given quote using VoiceRSS API with retries and timeout protection."""
     global voiceover_file, _voiceover_cached_quote
 
+    #
+    # Cleanup previous file handles
+    #
     if voiceover_file and os.path.exists(voiceover_file):
         try:
             os.remove(voiceover_file)
         except Exception as e:
             logging.warning(f"Could not clear target location voiceover: {e}")
-            
+
     if os.path.exists("voiceover.mp3"):
         try:
             os.remove("voiceover.mp3")
@@ -381,41 +390,66 @@ def fetch_voiceover(quote, api_key):
         "c": "mp3",
         "f": "44khz_16bit_stereo",
         "b64": "false",
-        "v": "John"
+        "v": "John",
     }
-    try:
-        response = requests.get(url, params=params, timeout=12)
-        response.raise_for_status()
-        ct = response.headers.get("Content-Type", "")
-        if "audio" not in ct.lower() and not response.content.startswith(b"ID3"):
-            logging.error("TTS endpoint engine returned non-audio body headers; dropping payload.")
-            out = _create_silent_audio(4, out_path="voiceover.mp3")
-            voiceover_file = out
+
+    # (connect_timeout, read_timeout): 10s to connect, 45s to render/stream MP3 payload
+    timeout_config = (10, 45)
+
+    for attempt in range(1, max_retries + 1):
+        try:
+            logging.info(f"Fetching VoiceRSS audio (attempt {attempt}/{max_retries})...")
+            response = requests.get(url, params=params, timeout=timeout_config)
+            response.raise_for_status()
+
+            # VoiceRSS returns plain-text API error messages (e.g. invalid key or quota exceeded)
+            if response.content.startswith(b"ERROR:"):
+                error_msg = response.content.decode("utf-8", errors="ignore")
+                logging.error(f"VoiceRSS returned API error payload: {error_msg}")
+                break
+
+            ct = response.headers.get("Content-Type", "")
+            if "audio" not in ct.lower() and not response.content.startswith(b"ID3"):
+                logging.error("TTS endpoint engine returned non-audio body headers; dropping payload.")
+                break
+
+            if len(response.content) < 1000:
+                logging.warning("TTS system returned broken package length; applying safe silent container setup.")
+                break
+
+            file_path = "voiceover.mp3"
+            with open(file_path, "wb") as f:
+                f.write(response.content)
+
+            logging.info(f"Downloaded new voiceover asset cleanly to location: {file_path}")
+            voiceover_file = file_path
             _voiceover_cached_quote = quote
             return voiceover_file
-            
-        if len(response.content) < 1000:
-            logging.warning("TTS system returned broken package length; applying safe silent container setup.")
-            out = _create_silent_audio(4, out_path="voiceover.mp3")
-            voiceover_file = out
-            _voiceover_cached_quote = quote
-            return voiceover_file
-            
-        file_path = "voiceover.mp3"
-        with open(file_path, "wb") as f:
-            f.write(response.content)
-        logging.info(f"Downloaded new voiceover asset cleanly to location: {file_path}")
-        voiceover_file = file_path
-        _voiceover_cached_quote = quote
-        return voiceover_file
-    except Exception as e:
-        logging.error(f"Error fetching/saving automation audio voiceover modules: {e}")
-        
+
+        except (requests.exceptions.Timeout, requests.exceptions.RequestException) as e:
+            wait_time = retry_delay * attempt
+            if attempt >= max_retries:
+                logging.error(f"VoiceRSS request failed after {max_retries} attempts: {e}")
+                break
+
+            logging.warning(
+                f"VoiceRSS attempt {attempt}/{max_retries} timed out or failed: {e}. "
+                f"Retrying in {wait_time:.1f}s..."
+            )
+            time.sleep(wait_time)
+
+        except Exception as e:
+            logging.error(f"Error fetching/saving automation audio voiceover modules: {e}")
+            break
+
+    #
+    # Fallback to silent matrix audio container if retries are exhausted or invalid responses are returned
+    #
     out = _create_silent_audio(4, out_path="voiceover.mp3")
     voiceover_file = out
     _voiceover_cached_quote = quote
     return voiceover_file
-
+    
 def create_quote_mobjects(quote_text, quote_author, frame_width, frame_height):
     """Creates properly formatted text layout components for Manim render matrix configurations."""
     wrapped_quote = "\n".join(textwrap.wrap(quote_text, width=40))
