@@ -160,7 +160,7 @@ def _save_download_history(history_file, history_set):
 # 1. FETCH COSMIC NATURE HD IMAGES (APOD + Nature Blend)
 # =========================================================================
 
-def fetch_hd_nature_images(target_dir=NATURE_IMAGES_DIR, num_images=10):
+def fetch_hd_nature_images(target_dir=NATURE_IMAGES_DIR, num_images=1):
     """
     Fetches unique HD nature images that blend seamlessly with APOD space themes 
     (Milky Way, Auroras, Night Skies, Astrophotography) to feed AI caption generators.
@@ -266,7 +266,7 @@ def fetch_hd_nature_images(target_dir=NATURE_IMAGES_DIR, num_images=10):
 # 2. FETCH CELESTIAL & BOTANICAL ILLUSTRATIONS / VECTORS
 # =========================================================================
 
-def fetch_hd_nature_images2(target_dir=r"C:\Users\Jeremy\Desktop\Nature_Illustrations", num_images=5):
+def fetch_hd_nature_images2(target_dir=r"C:\Users\Jeremy\Desktop\Nature_Illustrations", num_images=1):
     """Fetches unique celestial, astronomy, and botanical background vectors/illustrations."""
     os.makedirs(target_dir, exist_ok=True)
     logging.info(f"Fetching {num_images} new celestial/botanical background illustrations into {target_dir}...")
@@ -897,9 +897,9 @@ class AnimatedQuoteWithBackground(Scene):
     def construct(self):
         
         # 1. Run the new image fetcher right at the beginning of the scene
-        fetch_hd_nature_images(num_images=10)
-        fetch_hd_nature_images2(num_images=5)
-        fetch_nature_video()
+        # fetch_hd_nature_images(num_images=1)
+        # fetch_hd_nature_images2(num_images=1)
+        # fetch_nature_video()
 
         total_duration = 7
 

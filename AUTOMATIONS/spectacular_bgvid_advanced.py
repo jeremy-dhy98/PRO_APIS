@@ -508,7 +508,7 @@ def _save_downloaded_image_history(history_file: str, history_set: set):
 def fetch_and_save_hd_space_images(
     target_dir: str = SPACE_DIR,
     history_file: str = SPACE_IMAGE_HISTORY_FILE,
-    target_count: int = 5
+    target_count: int = 1
 ) -> int:
     """
     Fetches unique space/astronomy background images in portrait orientation (9:16)
@@ -862,7 +862,8 @@ class AnimatedQuoteWithBackground(Scene):
         # ── Trigger HD Space Image & Video Fetch ──
         space_video_file = None
         try:
-            fetch_and_save_hd_space_images(target_count=10)
+            pass
+            # fetch_and_save_hd_space_images(target_count=1)
             space_video_file = fetch_space_video(target_dir=SPACE_DIR)
         except Exception as e:
             logging.warning(f"HD image/video fetch step failed: {e}")
